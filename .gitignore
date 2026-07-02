@@ -1,0 +1,40 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+
+# IntelliJ project files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Mac OS metadata
+.DS_Store
+
+# Flutter/Dart artifacts
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Android specific
+android/app/signatures.json
+android/local.properties
+*.keystore
+*.jks
+
+# iOS specific
+ios/.generated/
+ios/Flutter/Ephemeral/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
