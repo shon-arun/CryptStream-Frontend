@@ -132,7 +132,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
   String _errorMessage = "";
 
   // Define your mandatory secondary security string here
-  final String _secretPassphrase = "testadmin42626"; 
+  final String _secretPassphrase = "testadmin42636"; 
 
   void _verifyPassphrase() {
     if (_controller.text == _secretPassphrase) {
