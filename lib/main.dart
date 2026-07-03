@@ -312,7 +312,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                     padding: const EdgeInsets.only(bottom: 24.0),
                     child: Column(
                       children: [
-                        const Text("Device Public Key (Geoloc):", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        const Text("Device Public Key:", style: TextStyle(color: Colors.white70, fontSize: 12)),
                         SelectableText(
                           snapshot.data ?? "Loading...",
                           style: const TextStyle(color: Colors.redAccent, fontSize: 10),
