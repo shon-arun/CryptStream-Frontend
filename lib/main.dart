@@ -48,6 +48,11 @@ class DeviceIdentity {
       );
     }
   }
+
+  static Future<String> getPublicKeyString() async {
+  String? publicKeyBase64 = await _storage.read(key: 'device_public_key');
+  return publicKeyBase64 ?? "Key not generated";
+}
 }
 
 class BiometricGate extends StatefulWidget {
@@ -242,6 +247,23 @@ class _PassphraseGateState extends State<PassphraseGate> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              FutureBuilder<String>(
+                future: DeviceIdentity.getPublicKeyString(),
+                builder: (context, snapshot) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 24.0),
+                    child: Column(
+                      children: [
+                        const Text("Device Public Key:", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        SelectableText(
+                          snapshot.data ?? "Loading...",
+                          style: const TextStyle(color: Colors.redAccent, fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               const Icon(
                 Icons.password,
                 size: 80,
