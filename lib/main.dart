@@ -360,11 +360,24 @@ Future<Uint8List> signChallenge(String challenge, String privateKeyBase64) async
   return Uint8List.fromList(signature.bytes);
 }
 
+Future<Map<String, double>> getCurrentLocation() async {
+  Position position = await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
+  return {
+    "lat": position.latitude,
+    "lon": position.longitude,
+  };
+}
+
 Future<Uint8List> fetchAndDecryptImage() async {
   String deviceId = await DeviceIdentity.getDeviceId();
+
+  final loc = await getCurrentLocation();
+  final locParams = "lat=${loc['lat']}&lon=${loc['lon']}";
   
   final challengeRes = await http.get(
-    Uri.parse('http://192.168.1.2:8000/request-challenge/$deviceId')
+    Uri.parse('http://192.168.1.2:8000/request-challenge/$deviceId?$locParams')
   );
   if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
   
@@ -378,12 +391,18 @@ Future<Uint8List> fetchAndDecryptImage() async {
   final verifyRes = await http.post(
     Uri.parse('http://192.168.1.2:8000/verify/$deviceId'),
     headers: {"Content-Type": "application/json"},
-    body: jsonEncode({"signature": base64Encode(sig)}),
+    body: jsonEncode(
+      {
+        "signature": base64Encode(sig),
+        "lat": loc['lat'],
+        "lon": loc['lon']
+      }
+    ),
   );
   if (verifyRes.statusCode != 200) throw Exception("Verification failed");
   
   final response = await http.get(
-    Uri.parse('http://192.168.1.2:8000/?device_id=$deviceId')
+    Uri.parse('http://192.168.1.2:8000/?device_id=$deviceId&$locParams')
   );
 
   if (response.statusCode != 200) {
