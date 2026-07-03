@@ -8,6 +8,8 @@ import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
+import 'dart:async';
+import 'package:geolocator/geolocator.dart';
 
 void main() {
   runApp(
@@ -16,6 +18,39 @@ void main() {
       home: BiometricGate(),
     ),
   );
+
+  LocationHeartbeat.start();
+}
+
+class LocationHeartbeat {
+  static Timer? _timer;
+
+  static void start() {
+    _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      try {
+        Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high
+        );
+        
+        String deviceId = await DeviceIdentity.getDeviceId();
+        
+        await http.post(
+          Uri.parse('http://192.168.1.2:8000/heartbeat/$deviceId'),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "lat": position.latitude,
+            "lon": position.longitude
+          }),
+        );
+      } catch (e) {
+        // Silently fail as requested
+      }
+    });
+  }
+
+  static void stop() {
+    _timer?.cancel();
+  }
 }
 
 class DeviceIdentity {
