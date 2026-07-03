@@ -19,29 +19,32 @@ void main() {
 
 class DeviceIdentity {
   static const _storage = FlutterSecureStorage();
-  
   static final _algorithm = Ed25519();
   
+  static Future<String> getDeviceId() async {
+    String? deviceId = await _storage.read(key: 'device_id');
+    if (deviceId == null) {
+      deviceId = DateTime.now().millisecondsSinceEpoch.toString();
+      await _storage.write(key: 'device_id', value: deviceId);
+    }
+    return deviceId;
+  }
+
   static Future<void> generateAndStoreKeys() async {
     final storedPrivateKey = await _storage.read(key: 'device_private_key');
-    
     if (storedPrivateKey == null) {
       final keyPair = await _algorithm.newKeyPair();
-      
       final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
       final publicKey = await keyPair.extractPublicKey();
       
       await _storage.write(
-        key: 'device_private_key',
-        value: base64Encode(privateKeyBytes),
+        key: 'device_private_key', 
+        value: base64Encode(privateKeyBytes)
       );
       await _storage.write(
-        key: 'device_public_key',
-        value: base64Encode(publicKey.bytes),
+        key: 'device_public_key', 
+        value: base64Encode(publicKey.bytes)
       );
-      
-    } else {
-      final storedPublicKey = await _storage.read(key: 'device_public_key');
     }
   }
 }
@@ -281,10 +284,33 @@ class _PassphraseGateState extends State<PassphraseGate> {
 }
 
 Future<Uint8List> fetchAndDecryptImage() async {
-  final response = await http.get(Uri.parse('http://192.168.1.2:8000/'));
+  String deviceId = await DeviceIdentity.getDeviceId();
   
+  final challengeRes = await http.get(
+    Uri.parse('http://192.168.1.2:8000/request-challenge/$deviceId')
+  );
+  if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
+  
+  String challenge = jsonDecode(challengeRes.body)['challenge'];
+  
+  String? privKeyBase64 = await const FlutterSecureStorage().read(key: 'device_private_key');
+  if (privKeyBase64 == null) throw Exception("Device identity not initialized");
+  
+  Uint8List sig = await signChallenge(challenge, privKeyBase64);
+  
+  final verifyRes = await http.post(
+    Uri.parse('http://192.168.1.2:8000/verify/$deviceId'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({"signature": base64Encode(sig)}),
+  );
+  if (verifyRes.statusCode != 200) throw Exception("Verification failed");
+  
+  final response = await http.get(
+    Uri.parse('http://192.168.1.2:8000/?device_id=$deviceId')
+  );
+
   if (response.statusCode != 200) {
-    throw Exception('Failed to fetch payload. Server returned: ${response.statusCode}');
+    throw Exception('Failed to fetch payload: ${response.statusCode}');
   }
 
   Uint8List fullPayload = response.bodyBytes;
