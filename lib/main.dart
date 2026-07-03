@@ -4,6 +4,9 @@ import 'package:local_auth/local_auth.dart';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:encrypt/encrypt.dart' as encrypt;
+import 'dart:convert';
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 void main() {
   runApp(
@@ -12,6 +15,36 @@ void main() {
       home: BiometricGate(),
     ),
   );
+}
+
+class DeviceIdentity {
+  static const _storage = FlutterSecureStorage();
+  
+  static final _algorithm = Ed25519();
+  
+  static Future<void> generateAndStoreKeys() async {
+    final storedPrivateKey = await _storage.read(key: 'device_private_key');
+    
+    if (storedPrivateKey == null) {
+      print("No hardware identity found. Generating new EC Key Pair...");
+      final keyPair = await _algorithm.newKeyPair();
+      
+      final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
+      final publicKey = await keyPair.extractPublicKey();
+      
+      await _storage.write(
+        key: 'device_private_key',
+        value: base64Encode(privateKeyBytes),
+      );
+      await _storage.write(
+        key: 'device_public_key',
+        value: base64Encode(publicKey.bytes),
+      );
+      
+    } else {
+      final storedPublicKey = await _storage.read(key: 'device_public_key');
+    }
+  }
 }
 
 class BiometricGate extends StatefulWidget {
@@ -29,7 +62,16 @@ class _BiometricGateState extends State<BiometricGate> {
   @override
   void initState() {
     super.initState();
+    _initializeIdentity();
     _authenticate();
+  }
+
+  Future<void> _initializeIdentity() async {
+    try {
+      await DeviceIdentity.generateAndStoreKeys();
+    } catch (e) {
+      print("Error generating device identity: $e");
+    }
   }
 
   Future<void> _authenticate() async {
@@ -134,7 +176,6 @@ class _PassphraseGateState extends State<PassphraseGate> {
   bool _isFullyUnlocked = false;
   String _errorMessage = "";
 
-  // Define your mandatory secondary security string here
   final String _secretPassphrase = "testadmin42636"; 
 
   void _verifyPassphrase() {
