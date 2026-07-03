@@ -43,7 +43,7 @@ class LocationHeartbeat {
           String deviceId = await DeviceIdentity.getDeviceId();
           
           await http.post(
-            Uri.parse('http://192.168.1.2:8000/heartbeat/$deviceId'),
+            Uri.parse('http://192.168.1.2/heartbeat/$deviceId'),
             headers: {"Content-Type": "application/json"},
             body: jsonEncode({
               "lat": position.latitude,
@@ -377,7 +377,7 @@ Future<Uint8List> fetchAndDecryptImage() async {
   final locParams = "lat=${loc['lat']}&lon=${loc['lon']}";
   
   final challengeRes = await http.get(
-    Uri.parse('http://192.168.1.2:8000/request-challenge/$deviceId?$locParams')
+    Uri.parse('http://192.168.1.2/request-challenge/$deviceId?$locParams')
   );
   if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
   
@@ -389,7 +389,7 @@ Future<Uint8List> fetchAndDecryptImage() async {
   Uint8List sig = await signChallenge(challenge, privKeyBase64);
   
   final verifyRes = await http.post(
-    Uri.parse('http://192.168.1.2:8000/verify/$deviceId'),
+    Uri.parse('http://192.168.1.2/verify/$deviceId'),
     headers: {"Content-Type": "application/json"},
     body: jsonEncode(
       {
@@ -402,7 +402,7 @@ Future<Uint8List> fetchAndDecryptImage() async {
   if (verifyRes.statusCode != 200) throw Exception("Verification failed");
   
   final response = await http.get(
-    Uri.parse('http://192.168.1.2:8000/?device_id=$deviceId&$locParams')
+    Uri.parse('http://192.168.1.2/?device_id=$deviceId&$locParams')
   );
 
   if (response.statusCode != 200) {
