@@ -10,8 +10,11 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:async';
 import 'package:geolocator/geolocator.dart';
+import 'dart:io';
 
 void main() {
+  HttpOverrides.global = DevHttpOverrides();
+  
   runApp(
     const MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -20,6 +23,17 @@ void main() {
   );
 
   LocationHeartbeat.start();
+}
+
+class DevHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (X509Certificate cert, String host, int port) {
+        // Trust your local backend IP
+        return host == "192.168.1.2"; 
+      };
+  }
 }
 
 class LocationHeartbeat {
