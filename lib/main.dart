@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
+import 'dart:typed_data';
+import 'package:http/http.dart' as http;
+import 'package:encrypt/encrypt.dart' as encrypt;
 
 void main() {
   runApp(
@@ -155,15 +158,32 @@ class _PassphraseGateState extends State<PassphraseGate> {
 
   @override
   Widget build(BuildContext context) {
-    // Metric fulfilled: Both fingerprint and string matched.
-    // The image fetch sequence triggers here.
     if (_isFullyUnlocked) {
       return Scaffold(
         backgroundColor: Colors.black,
         body: Center(
-          child: Image.network(
-            'http://192.168.1.2:8000/',
-            fit: BoxFit.contain,
+          child: FutureBuilder<Uint8List>(
+            future: fetchAndDecryptImage(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const CircularProgressIndicator(color: Colors.blueAccent);
+              } else if (snapshot.hasError) {
+                return Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    'Error: ${snapshot.error}',
+                    style: const TextStyle(color: Colors.redAccent, fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                );
+              } else if (snapshot.hasData) {
+                return Image.memory(
+                  snapshot.data!,
+                  fit: BoxFit.contain,
+                );
+              }
+              return const Text("No data", style: TextStyle(color: Colors.white));
+            },
           ),
         ),
       );
@@ -218,4 +238,30 @@ class _PassphraseGateState extends State<PassphraseGate> {
       ),
     );
   }
+}
+
+Future<Uint8List> fetchAndDecryptImage() async {
+  final response = await http.get(Uri.parse('http://192.168.1.2:8000/'));
+  
+  if (response.statusCode != 200) {
+    throw Exception('Failed to fetch payload. Server returned: ${response.statusCode}');
+  }
+
+  Uint8List fullPayload = response.bodyBytes;
+
+  Uint8List ivBytes = fullPayload.sublist(0, 16);
+  Uint8List cipherTextBytes = fullPayload.sublist(16);
+
+  final keyString = "MySecret32ByteHardcodedKeyHere42";
+  final key = encrypt.Key.fromUtf8(keyString);
+  final iv = encrypt.IV(ivBytes);
+
+  final encrypter = encrypt.Encrypter(
+    encrypt.AES(key, mode: encrypt.AESMode.cbc, padding: 'PKCS7')
+  );
+
+  final encryptedData = encrypt.Encrypted(cipherTextBytes);
+  final decryptedBytes = encrypter.decryptBytes(encryptedData, iv: iv);
+
+  return Uint8List.fromList(decryptedBytes);
 }
