@@ -26,7 +26,6 @@ class DeviceIdentity {
     final storedPrivateKey = await _storage.read(key: 'device_private_key');
     
     if (storedPrivateKey == null) {
-      print("No hardware identity found. Generating new EC Key Pair...");
       final keyPair = await _algorithm.newKeyPair();
       
       final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
