@@ -7,6 +7,7 @@ import 'package:encrypt/encrypt.dart' as encrypt;
 import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:uuid/uuid.dart';
 
 void main() {
   runApp(
@@ -24,7 +25,7 @@ class DeviceIdentity {
   static Future<String> getDeviceId() async {
     String? deviceId = await _storage.read(key: 'device_id');
     if (deviceId == null) {
-      deviceId = DateTime.now().millisecondsSinceEpoch.toString();
+      deviceId = const Uuid().v4();
       await _storage.write(key: 'device_id', value: deviceId);
     }
     return deviceId;
