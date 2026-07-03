@@ -201,7 +201,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
               const Icon(
                 Icons.password,
                 size: 80,
-                color: Colors.blueAccent,
+                color: Colors.redAccent,
               ),
               const SizedBox(height: 24),
               const Text(
@@ -227,7 +227,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                 icon: const Icon(Icons.login),
                 label: const Text("Unlock Stream"),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blueAccent,
+                  backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
