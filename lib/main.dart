@@ -306,6 +306,16 @@ class _PassphraseGateState extends State<PassphraseGate> {
   }
 }
 
+Future<Uint8List> signChallenge(String challenge, String privateKeyBase64) async {
+  final privateKeyBytes = base64Decode(privateKeyBase64);
+  final keyPair = await Ed25519().newKeyPairFromSeed(privateKeyBytes);
+  final signature = await Ed25519().sign(
+    utf8.encode(challenge),
+    keyPair: keyPair,
+  );
+  return Uint8List.fromList(signature.bytes);
+}
+
 Future<Uint8List> fetchAndDecryptImage() async {
   String deviceId = await DeviceIdentity.getDeviceId();
   
