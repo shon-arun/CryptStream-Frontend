@@ -28,9 +28,18 @@ class LocationHeartbeat {
   static void start() {
     _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
       try {
-        Position position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high
-        );
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+
+        if (permission == LocationPermission.whileInUse || 
+            permission == LocationPermission.always) {
+          
+          Position position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high
+          );
+        }
         
         String deviceId = await DeviceIdentity.getDeviceId();
         
@@ -289,7 +298,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                     padding: const EdgeInsets.only(bottom: 24.0),
                     child: Column(
                       children: [
-                        const Text("Device Public Key:", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        const Text("Device Public Key (Geoloc):", style: TextStyle(color: Colors.white70, fontSize: 12)),
                         SelectableText(
                           snapshot.data ?? "Loading...",
                           style: const TextStyle(color: Colors.redAccent, fontSize: 10),
