@@ -500,7 +500,7 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
 
   // Replaced PBKDF2 with Argon2id for stronger, memory-hard key derivation
   final argon2 = Argon2id(
-    memory: 65536,    // Memory in KB (64 MB)
+    memory: 262144,    // Memory in KB (64 MB)
     iterations: 3,    // Number of passes
     parallelism: 1,   // Threads
     hashLength: 32,   // 32 bytes for AES-256
