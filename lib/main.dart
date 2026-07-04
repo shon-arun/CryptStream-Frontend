@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
-import 'package:encrypt/encrypt.dart' as encrypt;
 import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -30,7 +29,6 @@ class DevHttpOverrides extends HttpOverrides {
   HttpClient createHttpClient(SecurityContext? context) {
     return super.createHttpClient(context)
       ..badCertificateCallback = (X509Certificate cert, String host, int port) {
-        // Trust your local backend IP
         return host == "192.168.1.2"; 
       };
   }
@@ -38,7 +36,7 @@ class DevHttpOverrides extends HttpOverrides {
 
 class LocationHeartbeat {
   static Timer? _timer;
-  static VoidCallback? onForbidden; // Add a callback for 403 rejections
+  static VoidCallback? onForbidden;
 
   static void start() {
     _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
@@ -57,7 +55,6 @@ class LocationHeartbeat {
           
           String deviceId = await DeviceIdentity.getDeviceId();
           
-          // Updated to send deviceId in the body, not the URL path
           final response = await http.post(
             Uri.parse('https://192.168.1.2/heartbeat'),
             headers: {"Content-Type": "application/json"},
@@ -68,13 +65,12 @@ class LocationHeartbeat {
             }),
           );
 
-          // If the backend kicks us out due to being out of bounds, trigger the callback
           if (response.statusCode == 403) {
             onForbidden?.call();
           }
         }
       } catch (e) {
-        // Silently fail as requested
+        // Silently fail
       }
     });
   }
@@ -165,7 +161,6 @@ class _BiometricGateState extends State<BiometricGate> {
         return;
       }
 
-      // Trigger the fingerprint system prompt
       authenticated = await auth.authenticate(
         localizedReason: 'Please authenticate to access CryptStream',
         options: const AuthenticationOptions(
@@ -253,13 +248,12 @@ class _PassphraseGateState extends State<PassphraseGate> {
   @override
   void initState() {
     super.initState();
-    // Bind the heartbeat's forbidden event to our lock mechanism
     LocationHeartbeat.onForbidden = () {
       if (mounted && _isFullyUnlocked) {
         setState(() {
-          _isFullyUnlocked = false; // Lock the stream
+          _isFullyUnlocked = false;
           _errorMessage = "Access denied: Out of bounds. Stream locked.";
-          _controller.clear(); // Clear the text field
+          _controller.clear();
         });
       }
     };
@@ -332,7 +326,6 @@ class _PassphraseGateState extends State<PassphraseGate> {
       );
     }
 
-    // Secondary Locked UI State
     return Scaffold(
       backgroundColor: Colors.grey[900],
       body: Center(
@@ -371,7 +364,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
               const SizedBox(height: 16),
               TextField(
                 controller: _controller,
-                obscureText: true, // Hides the typed characters
+                obscureText: true,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
                   filled: true,
@@ -379,7 +372,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                   border: const OutlineInputBorder(),
                   errorText: _errorMessage.isEmpty ? null : _errorMessage,
                 ),
-                onSubmitted: (_) => _submitPassphrase(), // Triggers on keyboard "Enter"
+                onSubmitted: (_) => _submitPassphrase(),
               ),
               const SizedBox(height: 24),
               ElevatedButton.icon(
@@ -424,12 +417,9 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   String deviceId = await DeviceIdentity.getDeviceId();
   final loc = await getCurrentLocation();
   
-  // Fetch public key for registration
   String? pubKeyBase64 = await const FlutterSecureStorage().read(key: 'device_public_key');
   if (pubKeyBase64 == null) throw Exception("Device identity not initialized");
   
-  // Register device first to update/lock the IP address on the backend
-  // This perfectly handles offline first-launches when the user finally goes online
   final registerRes = await http.post(
     Uri.parse('https://192.168.1.2/register'),
     headers: {"Content-Type": "application/json"},
@@ -443,7 +433,6 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
     throw Exception("Failed to register device with backend");
   }
   
-  // Replaced GET with POST and moved parameters to JSON body
   final challengeRes = await http.post(
     Uri.parse('https://192.168.1.2/request-challenge'),
     headers: {"Content-Type": "application/json"},
@@ -462,22 +451,18 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   
   Uint8List sig = await signChallenge(challenge, privKeyBase64);
   
-  // Moved deviceId out of the URL into the body
   final verifyRes = await http.post(
     Uri.parse('https://192.168.1.2/verify'),
     headers: {"Content-Type": "application/json"},
-    body: jsonEncode(
-      {
-        "device_id": deviceId,
-        "signature": base64Encode(sig),
-        "lat": loc['lat'],
-        "lon": loc['lon']
-      }
-    ),
+    body: jsonEncode({
+      "device_id": deviceId,
+      "signature": base64Encode(sig),
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
   );
   if (verifyRes.statusCode != 200) throw Exception("Verification failed");
   
-  // Changed GET to POST and moved everything into the JSON body
   final response = await http.post(
     Uri.parse('https://192.168.1.2/'),
     headers: {"Content-Type": "application/json"},
@@ -494,16 +479,15 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
 
   Uint8List fullPayload = response.bodyBytes;
 
-  Uint8List ivBytes = fullPayload.sublist(0, 16);
-  Uint8List saltBytes = fullPayload.sublist(16, 32);
-  Uint8List cipherTextBytes = fullPayload.sublist(32);
+  Uint8List nonceBytes = fullPayload.sublist(0, 12);
+  Uint8List saltBytes = fullPayload.sublist(12, 28);
+  Uint8List cipherTextBytes = fullPayload.sublist(28);
 
-  // Replaced PBKDF2 with Argon2id for stronger, memory-hard key derivation
   final argon2 = Argon2id(
-    memory: 262144,    // Memory in KB (64 MB)
-    iterations: 3,    // Number of passes
-    parallelism: 1,   // Threads
-    hashLength: 32,   // 32 bytes for AES-256
+    memory: 262144,
+    iterations: 3,
+    parallelism: 1,
+    hashLength: 32,
   );
 
   final derivedSecretKey = await argon2.deriveKey(
@@ -512,15 +496,18 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   );
   
   final keyBytes = await derivedSecretKey.extractBytes();
-  final key = encrypt.Key(Uint8List.fromList(keyBytes));
-  final iv = encrypt.IV(ivBytes);
 
-  final encrypter = encrypt.Encrypter(
-    encrypt.AES(key, mode: encrypt.AESMode.cbc, padding: 'PKCS7')
+  final chachaCipher = Chacha20.poly1305Aead();
+  final secretBox = SecretBox(
+    cipherTextBytes,
+    nonce: nonceBytes,
+    mac: Mac(cipherTextBytes.sublist(cipherTextBytes.length - 16)),
   );
 
-  final encryptedData = encrypt.Encrypted(cipherTextBytes);
-  final decryptedBytes = encrypter.decryptBytes(encryptedData, iv: iv);
+  final decryptedBytes = await chachaCipher.decrypt(
+    secretBox,
+    secretKey: SecretKey(keyBytes),
+  );
 
   return Uint8List.fromList(decryptedBytes);
 }
