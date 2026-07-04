@@ -481,7 +481,9 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
 
   Uint8List nonceBytes = fullPayload.sublist(0, 12);
   Uint8List saltBytes = fullPayload.sublist(12, 28);
-  Uint8List cipherTextBytes = fullPayload.sublist(28);
+  
+  Uint8List cipherTextBytes = fullPayload.sublist(28, fullPayload.length - 16);
+  Uint8List macBytes = fullPayload.sublist(fullPayload.length - 16);
 
   final argon2 = Argon2id(
     memory: 262144,
@@ -499,9 +501,9 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
 
   final chachaCipher = Chacha20.poly1305Aead();
   final secretBox = SecretBox(
-    cipherTextBytes,
+    cipherTextBytes, // This is now strictly the ciphertext without the MAC
     nonce: nonceBytes,
-    mac: Mac(cipherTextBytes.sublist(cipherTextBytes.length - 16)),
+    mac: Mac(macBytes),
   );
 
   final decryptedBytes = await chachaCipher.decrypt(
