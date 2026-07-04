@@ -38,6 +38,7 @@ class DevHttpOverrides extends HttpOverrides {
 
 class LocationHeartbeat {
   static Timer? _timer;
+  static VoidCallback? onForbidden; // Add a callback for 403 rejections
 
   static void start() {
     _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
@@ -56,14 +57,21 @@ class LocationHeartbeat {
           
           String deviceId = await DeviceIdentity.getDeviceId();
           
-          await http.post(
-            Uri.parse('https://192.168.1.2/heartbeat/$deviceId'),
+          // Updated to send deviceId in the body, not the URL path
+          final response = await http.post(
+            Uri.parse('https://192.168.1.2/heartbeat'),
             headers: {"Content-Type": "application/json"},
             body: jsonEncode({
+              "device_id": deviceId,
               "lat": position.latitude,
               "lon": position.longitude
             }),
           );
+
+          // If the backend kicks us out due to being out of bounds, trigger the callback
+          if (response.statusCode == 403) {
+            onForbidden?.call();
+          }
         }
       } catch (e) {
         // Silently fail as requested
@@ -108,9 +116,9 @@ class DeviceIdentity {
   }
 
   static Future<String> getPublicKeyString() async {
-  String? publicKeyBase64 = await _storage.read(key: 'device_public_key');
-  return publicKeyBase64 ?? "Key not generated";
-}
+    String? publicKeyBase64 = await _storage.read(key: 'device_public_key');
+    return publicKeyBase64 ?? "Key not generated";
+  }
 }
 
 class BiometricGate extends StatefulWidget {
@@ -244,6 +252,21 @@ class _PassphraseGateState extends State<PassphraseGate> {
 
   final String _secretPassphrase = "testadmin42636"; 
 
+  @override
+  void initState() {
+    super.initState();
+    // Bind the heartbeat's forbidden event to our lock mechanism
+    LocationHeartbeat.onForbidden = () {
+      if (mounted && _isFullyUnlocked) {
+        setState(() {
+          _isFullyUnlocked = false; // Lock the stream
+          _errorMessage = "Access denied: Out of bounds. Stream locked.";
+          _controller.clear(); // Clear the text field
+        });
+      }
+    };
+  }
+
   void _verifyPassphrase() {
     if (_controller.text == _secretPassphrase) {
       setState(() {
@@ -270,7 +293,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
         backgroundColor: Colors.black,
         body: Center(
           child: FutureBuilder<Uint8List>(
-            future: fetchAndDecryptImage(),
+            future: fetchAndDecryptImage(_controller.text),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const CircularProgressIndicator(color: Colors.blueAccent);
@@ -384,14 +407,38 @@ Future<Map<String, double>> getCurrentLocation() async {
   };
 }
 
-Future<Uint8List> fetchAndDecryptImage() async {
+Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   String deviceId = await DeviceIdentity.getDeviceId();
-
   final loc = await getCurrentLocation();
-  final locParams = "lat=${loc['lat']}&lon=${loc['lon']}";
   
-  final challengeRes = await http.get(
-    Uri.parse('https://192.168.1.2/request-challenge/$deviceId?$locParams')
+  // Fetch public key for registration
+  String? pubKeyBase64 = await const FlutterSecureStorage().read(key: 'device_public_key');
+  if (pubKeyBase64 == null) throw Exception("Device identity not initialized");
+  
+  // Register device first to update/lock the IP address on the backend
+  // This perfectly handles offline first-launches when the user finally goes online
+  final registerRes = await http.post(
+    Uri.parse('https://192.168.1.2/register'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "public_key": pubKeyBase64,
+    }),
+  );
+  
+  if (registerRes.statusCode != 200) {
+    throw Exception("Failed to register device with backend");
+  }
+  
+  // Replaced GET with POST and moved parameters to JSON body
+  final challengeRes = await http.post(
+    Uri.parse('https://192.168.1.2/request-challenge'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
   );
   if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
   
@@ -402,11 +449,13 @@ Future<Uint8List> fetchAndDecryptImage() async {
   
   Uint8List sig = await signChallenge(challenge, privKeyBase64);
   
+  // Moved deviceId out of the URL into the body
   final verifyRes = await http.post(
-    Uri.parse('https://192.168.1.2/verify/$deviceId'),
+    Uri.parse('https://192.168.1.2/verify'),
     headers: {"Content-Type": "application/json"},
     body: jsonEncode(
       {
+        "device_id": deviceId,
         "signature": base64Encode(sig),
         "lat": loc['lat'],
         "lon": loc['lon']
@@ -415,8 +464,15 @@ Future<Uint8List> fetchAndDecryptImage() async {
   );
   if (verifyRes.statusCode != 200) throw Exception("Verification failed");
   
-  final response = await http.get(
-    Uri.parse('https://192.168.1.2/?device_id=$deviceId&$locParams')
+  // Changed GET to POST and moved everything into the JSON body
+  final response = await http.post(
+    Uri.parse('https://192.168.1.2/'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
   );
 
   if (response.statusCode != 200) {
@@ -426,10 +482,22 @@ Future<Uint8List> fetchAndDecryptImage() async {
   Uint8List fullPayload = response.bodyBytes;
 
   Uint8List ivBytes = fullPayload.sublist(0, 16);
-  Uint8List cipherTextBytes = fullPayload.sublist(16);
+  Uint8List saltBytes = fullPayload.sublist(16, 32);
+  Uint8List cipherTextBytes = fullPayload.sublist(32);
 
-  final keyString = "MySecret32ByteHardcodedKeyHere42";
-  final key = encrypt.Key.fromUtf8(keyString);
+  final pbkdf2 = Pbkdf2(
+    macAlgorithm: Hmac.sha256(),
+    iterations: 10000,
+    bits: 256,
+  );
+
+  final derivedSecretKey = await pbkdf2.deriveKey(
+    secretKey: SecretKey(utf8.encode(passphrase)),
+    nonce: saltBytes, 
+  );
+  
+  final keyBytes = await derivedSecretKey.extractBytes();
+  final key = encrypt.Key(Uint8List.fromList(keyBytes));
   final iv = encrypt.IV(ivBytes);
 
   final encrypter = encrypt.Encrypter(
