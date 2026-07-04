@@ -81,7 +81,14 @@ class LocationHeartbeat {
 }
 
 class DeviceIdentity {
-  static const _storage = FlutterSecureStorage();
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+    ),
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.unlocked_this_device,
+    ),
+  );
   static final _algorithm = Ed25519();
   
   static Future<String> getDeviceId() async {
@@ -114,6 +121,14 @@ class DeviceIdentity {
   static Future<String> getPublicKeyString() async {
     String? publicKeyBase64 = await _storage.read(key: 'device_public_key');
     return publicKeyBase64 ?? "Key not generated";
+  }
+
+  static Future<String?> getPublicKey() async {
+    return await _storage.read(key: 'device_public_key');
+  }
+
+  static Future<String?> getPrivateKey() async {
+    return await _storage.read(key: 'device_private_key');
   }
 }
 
@@ -417,7 +432,7 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   String deviceId = await DeviceIdentity.getDeviceId();
   final loc = await getCurrentLocation();
   
-  String? pubKeyBase64 = await const FlutterSecureStorage().read(key: 'device_public_key');
+  String? pubKeyBase64 = await DeviceIdentity.getPublicKey();
   if (pubKeyBase64 == null) throw Exception("Device identity not initialized");
   
   final registerRes = await http.post(
@@ -446,7 +461,7 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   
   String challenge = jsonDecode(challengeRes.body)['challenge'];
   
-  String? privKeyBase64 = await const FlutterSecureStorage().read(key: 'device_private_key');
+  String? privKeyBase64 = await DeviceIdentity.getPrivateKey();
   if (privKeyBase64 == null) throw Exception("Device identity not initialized");
   
   Uint8List sig = await signChallenge(challenge, privKeyBase64);
