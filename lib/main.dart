@@ -250,8 +250,6 @@ class _PassphraseGateState extends State<PassphraseGate> {
   bool _isFullyUnlocked = false;
   String _errorMessage = "";
 
-  final String _secretPassphrase = "testadmin42636"; 
-
   @override
   void initState() {
     super.initState();
@@ -267,15 +265,15 @@ class _PassphraseGateState extends State<PassphraseGate> {
     };
   }
 
-  void _verifyPassphrase() {
-    if (_controller.text == _secretPassphrase) {
+  void _submitPassphrase() {
+    if (_controller.text.isNotEmpty) {
       setState(() {
         _isFullyUnlocked = true;
+        _errorMessage = "";
       });
     } else {
       setState(() {
-        _errorMessage = "Incorrect passphrase";
-        _controller.clear();
+        _errorMessage = "Please enter a passphrase";
       });
     }
   }
@@ -300,10 +298,25 @@ class _PassphraseGateState extends State<PassphraseGate> {
               } else if (snapshot.hasError) {
                 return Padding(
                   padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    'Error: ${snapshot.error}',
-                    style: const TextStyle(color: Colors.redAccent, fontSize: 16),
-                    textAlign: TextAlign.center,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        'Decryption Failed.\nEnsure your passphrase is correct.\n\nDetails: ${snapshot.error}',
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 16),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 24),
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _isFullyUnlocked = false;
+                            _controller.clear();
+                          });
+                        },
+                        child: const Text("Try Again"),
+                      )
+                    ],
                   ),
                 );
               } else if (snapshot.hasData) {
@@ -366,11 +379,11 @@ class _PassphraseGateState extends State<PassphraseGate> {
                   border: const OutlineInputBorder(),
                   errorText: _errorMessage.isEmpty ? null : _errorMessage,
                 ),
-                onSubmitted: (_) => _verifyPassphrase(), // Triggers on keyboard "Enter"
+                onSubmitted: (_) => _submitPassphrase(), // Triggers on keyboard "Enter"
               ),
               const SizedBox(height: 24),
               ElevatedButton.icon(
-                onPressed: _verifyPassphrase,
+                onPressed: _submitPassphrase,
                 icon: const Icon(Icons.login),
                 label: const Text("Unlock Stream"),
                 style: ElevatedButton.styleFrom(
