@@ -507,6 +507,11 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
   );
   if (registerRes.statusCode != 200) throw Exception("Registration failed");
   
+  // Extract the unique secure vault salt from the backend
+  final registerData = jsonDecode(registerRes.body);
+  final String vaultSaltB64 = registerData['vault_salt'];
+  final Uint8List vaultSalt = base64Decode(vaultSaltB64);
+  
   final challengeRes = await http.post(
     Uri.parse('https://192.168.1.2/request-challenge'),
     headers: {"Content-Type": "application/json"},
@@ -532,7 +537,7 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
   final argon2 = Argon2id(memory: 262144, iterations: 3, parallelism: 1, hashLength: 32);
   final derivedSecretKey = await argon2.deriveKey(
     secretKey: SecretKey(utf8.encode(passphrase)),
-    nonce: Uint8List(16),
+    nonce: vaultSalt, // Use the dynamically fetched unique vault salt
   );
   
   final keyBytes = await derivedSecretKey.extractBytes();
