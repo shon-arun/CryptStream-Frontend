@@ -1,0 +1,530 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:local_auth/local_auth.dart';
+import 'dart:typed_data';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:uuid/uuid.dart';
+import 'dart:async';
+import 'package:geolocator/geolocator.dart';
+import 'dart:io';
+
+void main() {
+  HttpOverrides.global = DevHttpOverrides();
+
+  runApp(
+    const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: BiometricGate(),
+    ),
+  );
+
+  LocationHeartbeat.start();
+}
+
+class DevHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (X509Certificate cert, String host, int port) {
+        return host == "192.168.1.2"; 
+      };
+  }
+}
+
+class LocationHeartbeat {
+  static Timer? _timer;
+  static VoidCallback? onForbidden;
+
+  static void start() {
+    _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      try {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+
+        if (permission == LocationPermission.whileInUse || 
+            permission == LocationPermission.always) {
+          
+          Position position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high
+          );
+          
+          String deviceId = await DeviceIdentity.getDeviceId();
+          
+          final response = await http.post(
+            Uri.parse('https://192.168.1.2/heartbeat'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId,
+              "lat": position.latitude,
+              "lon": position.longitude
+            }),
+          );
+
+          if (response.statusCode == 403) {
+            onForbidden?.call();
+          }
+        }
+      } catch (e) {
+        // Silently fail
+      }
+    });
+  }
+
+  static void stop() {
+    _timer?.cancel();
+  }
+}
+
+class DeviceIdentity {
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+    ),
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.unlocked_this_device,
+    ),
+  );
+  static final _algorithm = Ed25519();
+  
+  static Future<String> getDeviceId() async {
+    String? deviceId = await _storage.read(key: 'device_id');
+    if (deviceId == null) {
+      deviceId = const Uuid().v4();
+      await _storage.write(key: 'device_id', value: deviceId);
+    }
+    return deviceId;
+  }
+
+  static Future<void> generateAndStoreKeys() async {
+    final storedPrivateKey = await _storage.read(key: 'device_private_key');
+    if (storedPrivateKey == null) {
+      final keyPair = await _algorithm.newKeyPair();
+      final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
+      final publicKey = await keyPair.extractPublicKey();
+      
+      await _storage.write(
+        key: 'device_private_key', 
+        value: base64Encode(privateKeyBytes)
+      );
+      await _storage.write(
+        key: 'device_public_key', 
+        value: base64Encode(publicKey.bytes)
+      );
+    }
+  }
+
+  static Future<String> getPublicKeyString() async {
+    String? publicKeyBase64 = await _storage.read(key: 'device_public_key');
+    return publicKeyBase64 ?? "Key not generated";
+  }
+
+  static Future<String?> getPublicKey() async {
+    return await _storage.read(key: 'device_public_key');
+  }
+
+  static Future<String?> getPrivateKey() async {
+    return await _storage.read(key: 'device_private_key');
+  }
+}
+
+class BiometricGate extends StatefulWidget {
+  const BiometricGate({super.key});
+
+  @override
+  State<BiometricGate> createState() => _BiometricGateState();
+}
+
+class _BiometricGateState extends State<BiometricGate> {
+  final LocalAuthentication auth = LocalAuthentication();
+  bool _isAuthenticated = false;
+  String _statusMessage = "Authentication Required";
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeIdentity();
+    _authenticate();
+  }
+
+  Future<void> _initializeIdentity() async {
+    try {
+      await DeviceIdentity.generateAndStoreKeys();
+    } catch (e) {
+      print("Error generating device identity: $e");
+    }
+  }
+
+  Future<void> _authenticate() async {
+    bool authenticated = false;
+    try {
+      setState(() {
+        _statusMessage = "Scanning...";
+      });
+
+      final bool canAuthenticateWithBiometrics = await auth.canCheckBiometrics;
+      final bool canAuthenticate = canAuthenticateWithBiometrics || await auth.isDeviceSupported();
+
+      if (!canAuthenticate) {
+        setState(() {
+          _statusMessage = "Biometric hardware not available or not configured.";
+        });
+        return;
+      }
+
+      authenticated = await auth.authenticate(
+        localizedReason: 'Please authenticate to access CryptStream',
+        options: const AuthenticationOptions(
+          stickyAuth: true,
+          biometricOnly: true,
+        ),
+      );
+    } on PlatformException catch (e) {
+      setState(() {
+        _statusMessage = "Error: ${e.message}";
+      });
+      return;
+    }
+
+    if (!mounted) return;
+
+    if (authenticated) {
+      setState(() {
+        _isAuthenticated = true;
+        _statusMessage = "Authenticated Successfully";
+      });
+    } else {
+      setState(() {
+        _statusMessage = "Authentication Failed. Try again.";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isAuthenticated) {
+      return const PassphraseGate();
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.grey[900],
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.lock_outline,
+                size: 80,
+                color: Colors.redAccent,
+              ),
+              const SizedBox(height: 24),
+              Text(
+                _statusMessage,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 18),
+              ),
+              const SizedBox(height: 36),
+              ElevatedButton.icon(
+                onPressed: _authenticate,
+                icon: const Icon(Icons.fingerprint),
+                label: const Text("Retry Scan"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class PassphraseGate extends StatefulWidget {
+  const PassphraseGate({super.key});
+
+  @override
+  State<PassphraseGate> createState() => _PassphraseGateState();
+}
+
+class _PassphraseGateState extends State<PassphraseGate> {
+  final TextEditingController _controller = TextEditingController();
+  bool _isFullyUnlocked = false;
+  String _errorMessage = "";
+
+  @override
+  void initState() {
+    super.initState();
+    LocationHeartbeat.onForbidden = () {
+      if (mounted && _isFullyUnlocked) {
+        setState(() {
+          _isFullyUnlocked = false;
+          _errorMessage = "Access denied: Out of bounds. Stream locked.";
+          _controller.clear();
+        });
+      }
+    };
+  }
+
+  void _submitPassphrase() {
+    if (_controller.text.isNotEmpty) {
+      setState(() {
+        _isFullyUnlocked = true;
+        _errorMessage = "";
+      });
+    } else {
+      setState(() {
+        _errorMessage = "Please enter a passphrase";
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isFullyUnlocked) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: FutureBuilder<Uint8List>(
+            future: fetchAndDecryptImage(_controller.text),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const CircularProgressIndicator(color: Colors.blueAccent);
+              } else if (snapshot.hasError) {
+                return Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        'Decryption Failed.\nEnsure your passphrase is correct.\n\nDetails: ${snapshot.error}',
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 16),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 24),
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _isFullyUnlocked = false;
+                            _controller.clear();
+                          });
+                        },
+                        child: const Text("Try Again"),
+                      )
+                    ],
+                  ),
+                );
+              } else if (snapshot.hasData) {
+                return Image.memory(
+                  snapshot.data!,
+                  fit: BoxFit.contain,
+                );
+              }
+              return const Text("No data", style: TextStyle(color: Colors.white));
+            },
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.grey[900],
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              FutureBuilder<String>(
+                future: DeviceIdentity.getPublicKeyString(),
+                builder: (context, snapshot) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 24.0),
+                    child: Column(
+                      children: [
+                        const Text("Device Public Key:", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        SelectableText(
+                          snapshot.data ?? "Loading...",
+                          style: const TextStyle(color: Colors.redAccent, fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              const Icon(
+                Icons.password,
+                size: 80,
+                color: Colors.redAccent,
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                "Enter Passphrase",
+                style: TextStyle(color: Colors.white, fontSize: 18),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _controller,
+                obscureText: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.grey[800],
+                  border: const OutlineInputBorder(),
+                  errorText: _errorMessage.isEmpty ? null : _errorMessage,
+                ),
+                onSubmitted: (_) => _submitPassphrase(),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _submitPassphrase,
+                icon: const Icon(Icons.login),
+                label: const Text("Unlock Stream"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<Uint8List> signChallenge(String challenge, String privateKeyBase64) async {
+  final privateKeyBytes = base64Decode(privateKeyBase64);
+  final keyPair = await Ed25519().newKeyPairFromSeed(privateKeyBytes);
+  final signature = await Ed25519().sign(
+    utf8.encode(challenge),
+    keyPair: keyPair,
+  );
+  return Uint8List.fromList(signature.bytes);
+}
+
+Future<Map<String, double>> getCurrentLocation() async {
+  Position position = await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
+  return {
+    "lat": position.latitude,
+    "lon": position.longitude,
+  };
+}
+
+Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
+  String deviceId = await DeviceIdentity.getDeviceId();
+  final loc = await getCurrentLocation();
+  
+  String? pubKeyBase64 = await DeviceIdentity.getPublicKey();
+  if (pubKeyBase64 == null) throw Exception("Device identity not initialized");
+  
+  final registerRes = await http.post(
+    Uri.parse('https://192.168.1.2/register'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "public_key": pubKeyBase64,
+    }),
+  );
+  
+  if (registerRes.statusCode != 200) {
+    throw Exception("Failed to register device with backend");
+  }
+  
+  final challengeRes = await http.post(
+    Uri.parse('https://192.168.1.2/request-challenge'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
+  );
+  if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
+  
+  String challenge = jsonDecode(challengeRes.body)['challenge'];
+  
+  String? privKeyBase64 = await DeviceIdentity.getPrivateKey();
+  if (privKeyBase64 == null) throw Exception("Device identity not initialized");
+  
+  Uint8List sig = await signChallenge(challenge, privKeyBase64);
+  
+  final verifyRes = await http.post(
+    Uri.parse('https://192.168.1.2/verify'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "signature": base64Encode(sig),
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
+  );
+  if (verifyRes.statusCode != 200) throw Exception("Verification failed");
+  
+  final response = await http.post(
+    Uri.parse('https://192.168.1.2/'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "lat": loc['lat'],
+      "lon": loc['lon']
+    }),
+  );
+
+  if (response.statusCode != 200) {
+    throw Exception('Failed to fetch payload: ${response.statusCode}');
+  }
+
+  Uint8List fullPayload = response.bodyBytes;
+
+  Uint8List nonceBytes = fullPayload.sublist(0, 12);
+  Uint8List saltBytes = fullPayload.sublist(12, 28);
+  
+  Uint8List cipherTextBytes = fullPayload.sublist(28, fullPayload.length - 16);
+  Uint8List macBytes = fullPayload.sublist(fullPayload.length - 16);
+
+  final argon2 = Argon2id(
+    memory: 262144,
+    iterations: 3,
+    parallelism: 1,
+    hashLength: 32,
+  );
+
+  final derivedSecretKey = await argon2.deriveKey(
+    secretKey: SecretKey(utf8.encode(passphrase)),
+    nonce: saltBytes, 
+  );
+  
+  final keyBytes = await derivedSecretKey.extractBytes();
+
+  final chachaCipher = Chacha20.poly1305Aead();
+  final secretBox = SecretBox(
+    cipherTextBytes, // This is now strictly the ciphertext without the MAC
+    nonce: nonceBytes,
+    mac: Mac(macBytes),
+  );
+
+  final decryptedBytes = await chachaCipher.decrypt(
+    secretBox,
+    secretKey: SecretKey(keyBytes),
+  );
+
+  return Uint8List.fromList(decryptedBytes);
+}

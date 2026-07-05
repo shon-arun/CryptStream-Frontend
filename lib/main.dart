@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:local_auth/local_auth.dart';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
@@ -10,6 +11,9 @@ import 'package:uuid/uuid.dart';
 import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'dart:io';
+import 'dart:math';
+import 'package:path_provider/path_provider.dart';
+import 'package:image_picker/image_picker.dart'; // ADD THIS IMPORT
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -69,9 +73,7 @@ class LocationHeartbeat {
             onForbidden?.call();
           }
         }
-      } catch (e) {
-        // Silently fail
-      }
+      } catch (e) { }
     });
   }
 
@@ -82,12 +84,8 @@ class LocationHeartbeat {
 
 class DeviceIdentity {
   static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(
-      encryptedSharedPreferences: true,
-    ),
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.unlocked_this_device,
-    ),
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.unlocked_this_device),
   );
   static final _algorithm = Ed25519();
   
@@ -107,14 +105,8 @@ class DeviceIdentity {
       final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
       final publicKey = await keyPair.extractPublicKey();
       
-      await _storage.write(
-        key: 'device_private_key', 
-        value: base64Encode(privateKeyBytes)
-      );
-      await _storage.write(
-        key: 'device_public_key', 
-        value: base64Encode(publicKey.bytes)
-      );
+      await _storage.write(key: 'device_private_key', value: base64Encode(privateKeyBytes));
+      await _storage.write(key: 'device_public_key', value: base64Encode(publicKey.bytes));
     }
   }
 
@@ -128,13 +120,27 @@ class DeviceIdentity {
   }
 
   static Future<String?> getPrivateKey() async {
+    final LocalAuthentication auth = LocalAuthentication();
+    final bool canAuthenticateWithBiometrics = await auth.canCheckBiometrics;
+    final bool canAuthenticate = canAuthenticateWithBiometrics || await auth.isDeviceSupported();
+    
+    if (!canAuthenticate) {
+      throw Exception("Biometric hardware is required to release secure keys.");
+    }
+
+    final authenticated = await auth.authenticate(
+      localizedReason: 'Authenticate to release your private key',
+      options: const AuthenticationOptions(stickyAuth: true, biometricOnly: true),
+    );
+
+    if (!authenticated) throw Exception("Biometric authentication failed.");
+
     return await _storage.read(key: 'device_private_key');
   }
 }
 
 class BiometricGate extends StatefulWidget {
   const BiometricGate({super.key});
-
   @override
   State<BiometricGate> createState() => _BiometricGateState();
 }
@@ -162,31 +168,20 @@ class _BiometricGateState extends State<BiometricGate> {
   Future<void> _authenticate() async {
     bool authenticated = false;
     try {
-      setState(() {
-        _statusMessage = "Scanning...";
-      });
-
-      final bool canAuthenticateWithBiometrics = await auth.canCheckBiometrics;
-      final bool canAuthenticate = canAuthenticateWithBiometrics || await auth.isDeviceSupported();
+      setState(() => _statusMessage = "Scanning...");
+      final bool canAuthenticate = await auth.canCheckBiometrics || await auth.isDeviceSupported();
 
       if (!canAuthenticate) {
-        setState(() {
-          _statusMessage = "Biometric hardware not available or not configured.";
-        });
+        setState(() => _statusMessage = "Biometric hardware not available or not configured.");
         return;
       }
 
       authenticated = await auth.authenticate(
         localizedReason: 'Please authenticate to access CryptStream',
-        options: const AuthenticationOptions(
-          stickyAuth: true,
-          biometricOnly: true,
-        ),
+        options: const AuthenticationOptions(stickyAuth: true, biometricOnly: true),
       );
     } on PlatformException catch (e) {
-      setState(() {
-        _statusMessage = "Error: ${e.message}";
-      });
+      setState(() => _statusMessage = "Error: ${e.message}");
       return;
     }
 
@@ -198,17 +193,13 @@ class _BiometricGateState extends State<BiometricGate> {
         _statusMessage = "Authenticated Successfully";
       });
     } else {
-      setState(() {
-        _statusMessage = "Authentication Failed. Try again.";
-      });
+      setState(() => _statusMessage = "Authentication Failed. Try again.");
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isAuthenticated) {
-      return const PassphraseGate();
-    }
+    if (_isAuthenticated) return const PassphraseGate();
 
     return Scaffold(
       backgroundColor: Colors.grey[900],
@@ -218,25 +209,16 @@ class _BiometricGateState extends State<BiometricGate> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
-                Icons.lock_outline,
-                size: 80,
-                color: Colors.redAccent,
-              ),
+              const Icon(Icons.lock_outline, size: 80, color: Colors.redAccent),
               const SizedBox(height: 24),
-              Text(
-                _statusMessage,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 18),
-              ),
+              Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 18)),
               const SizedBox(height: 36),
               ElevatedButton.icon(
                 onPressed: _authenticate,
                 icon: const Icon(Icons.fingerprint),
                 label: const Text("Retry Scan"),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.redAccent,
-                  foregroundColor: Colors.white,
+                  backgroundColor: Colors.redAccent, foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
               ),
@@ -250,24 +232,23 @@ class _BiometricGateState extends State<BiometricGate> {
 
 class PassphraseGate extends StatefulWidget {
   const PassphraseGate({super.key});
-
   @override
   State<PassphraseGate> createState() => _PassphraseGateState();
 }
 
 class _PassphraseGateState extends State<PassphraseGate> {
   final TextEditingController _controller = TextEditingController();
-  bool _isFullyUnlocked = false;
+  bool _isBootstrapping = false;
   String _errorMessage = "";
 
   @override
   void initState() {
     super.initState();
     LocationHeartbeat.onForbidden = () {
-      if (mounted && _isFullyUnlocked) {
+      if (mounted && _isBootstrapping) {
         setState(() {
-          _isFullyUnlocked = false;
-          _errorMessage = "Access denied: Out of bounds. Stream locked.";
+          _isBootstrapping = false;
+          _errorMessage = "Access denied: Out of bounds. Session locked.";
           _controller.clear();
         });
       }
@@ -276,14 +257,9 @@ class _PassphraseGateState extends State<PassphraseGate> {
 
   void _submitPassphrase() {
     if (_controller.text.isNotEmpty) {
-      setState(() {
-        _isFullyUnlocked = true;
-        _errorMessage = "";
-      });
+      setState(() { _isBootstrapping = true; _errorMessage = ""; });
     } else {
-      setState(() {
-        _errorMessage = "Please enter a passphrase";
-      });
+      setState(() => _errorMessage = "Please enter a passphrase");
     }
   }
 
@@ -295,33 +271,33 @@ class _PassphraseGateState extends State<PassphraseGate> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isFullyUnlocked) {
+    if (_isBootstrapping) {
       return Scaffold(
         backgroundColor: Colors.black,
         body: Center(
           child: FutureBuilder<Uint8List>(
-            future: fetchAndDecryptImage(_controller.text),
+            future: bootstrapSession(_controller.text),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const CircularProgressIndicator(color: Colors.blueAccent);
+                return const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(color: Colors.tealAccent),
+                    SizedBox(height: 24),
+                    Text("Deriving Master Encryption Key (Argon2id)...\nPlease wait.", textAlign: TextAlign.center, style: TextStyle(color: Colors.white70))
+                  ],
+                );
               } else if (snapshot.hasError) {
                 return Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(
-                        'Decryption Failed.\nEnsure your passphrase is correct.\n\nDetails: ${snapshot.error}',
-                        style: const TextStyle(color: Colors.redAccent, fontSize: 16),
-                        textAlign: TextAlign.center,
-                      ),
+                      Text('Bootstrapping Failed.\n\nDetails: ${snapshot.error}', style: const TextStyle(color: Colors.redAccent, fontSize: 16), textAlign: TextAlign.center),
                       const SizedBox(height: 24),
                       ElevatedButton(
                         onPressed: () {
-                          setState(() {
-                            _isFullyUnlocked = false;
-                            _controller.clear();
-                          });
+                          setState(() { _isBootstrapping = false; _controller.clear(); });
                         },
                         child: const Text("Try Again"),
                       )
@@ -329,10 +305,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                   ),
                 );
               } else if (snapshot.hasData) {
-                return Image.memory(
-                  snapshot.data!,
-                  fit: BoxFit.contain,
-                );
+                return GalleryGridView(mek: snapshot.data!);
               }
               return const Text("No data", style: TextStyle(color: Colors.white));
             },
@@ -357,34 +330,22 @@ class _PassphraseGateState extends State<PassphraseGate> {
                     child: Column(
                       children: [
                         const Text("Device Public Key:", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                        SelectableText(
-                          snapshot.data ?? "Loading...",
-                          style: const TextStyle(color: Colors.redAccent, fontSize: 10),
-                        ),
+                        SelectableText(snapshot.data ?? "Loading...", style: const TextStyle(color: Colors.redAccent, fontSize: 10)),
                       ],
                     ),
                   );
                 },
               ),
-              const Icon(
-                Icons.password,
-                size: 80,
-                color: Colors.redAccent,
-              ),
+              const Icon(Icons.password, size: 80, color: Colors.redAccent),
               const SizedBox(height: 24),
-              const Text(
-                "Enter Passphrase",
-                style: TextStyle(color: Colors.white, fontSize: 18),
-              ),
+              const Text("Enter Passphrase", style: TextStyle(color: Colors.white, fontSize: 18)),
               const SizedBox(height: 16),
               TextField(
                 controller: _controller,
                 obscureText: true,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.grey[800],
-                  border: const OutlineInputBorder(),
+                  filled: true, fillColor: Colors.grey[800], border: const OutlineInputBorder(),
                   errorText: _errorMessage.isEmpty ? null : _errorMessage,
                 ),
                 onSubmitted: (_) => _submitPassphrase(),
@@ -393,10 +354,9 @@ class _PassphraseGateState extends State<PassphraseGate> {
               ElevatedButton.icon(
                 onPressed: _submitPassphrase,
                 icon: const Icon(Icons.login),
-                label: const Text("Unlock Stream"),
+                label: const Text("Boot Session"),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.redAccent,
-                  foregroundColor: Colors.white,
+                  backgroundColor: Colors.redAccent, foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
               ),
@@ -408,27 +368,64 @@ class _PassphraseGateState extends State<PassphraseGate> {
   }
 }
 
+// -------------------------------------------------------------
+// VFS DATA MODELS (Virtual File System)
+// -------------------------------------------------------------
+
+abstract class VfsNode {
+  final String type;                     // 't'
+  final Map<String, dynamic> metadata;   // 'm'
+  final List<String> pointers;           // 'p'
+  String nodeId = "";                    // Transient property for VFS navigation
+
+  VfsNode({required this.type, required this.metadata, required this.pointers});
+
+  factory VfsNode.fromJson(Map<String, dynamic> json) {
+    final t = json['t'] as String? ?? 'unknown';
+    final m = json['m'] as Map<String, dynamic>? ?? {};
+    final p = (json['p'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
+
+    if (t == 'd') return VfsDirectory(metadata: m, pointers: p);
+    if (t == 'j') return VfsJpeg(metadata: m, pointers: p);
+    return VfsGeneric(type: t, metadata: m, pointers: p);
+  }
+
+  Map<String, dynamic> toJson() => {'t': type, 'm': metadata, 'p': pointers};
+}
+
+class VfsGeneric extends VfsNode {
+  VfsGeneric({required super.type, required super.metadata, required super.pointers});
+}
+
+class VfsDirectory extends VfsNode {
+  VfsDirectory({required super.metadata, required super.pointers}) : super(type: 'd');
+  String get name => metadata['n'] ?? 'Unnamed Directory';
+}
+
+class VfsJpeg extends VfsNode {
+  VfsJpeg({required super.metadata, required super.pointers}) : super(type: 'j');
+  String get name => metadata['n'] ?? 'Unnamed Image';
+  String get thumbnailBase64 => metadata['tb'] ?? '';
+  String get assetKey => metadata['k'] ?? '';
+}
+
+// -------------------------------------------------------------
+// CORE CRYPTO LOGIC & ISOLATES
+// -------------------------------------------------------------
+
 Future<Uint8List> signChallenge(String challenge, String privateKeyBase64) async {
   final privateKeyBytes = base64Decode(privateKeyBase64);
   final keyPair = await Ed25519().newKeyPairFromSeed(privateKeyBytes);
-  final signature = await Ed25519().sign(
-    utf8.encode(challenge),
-    keyPair: keyPair,
-  );
+  final signature = await Ed25519().sign(utf8.encode(challenge), keyPair: keyPair);
   return Uint8List.fromList(signature.bytes);
 }
 
 Future<Map<String, double>> getCurrentLocation() async {
-  Position position = await Geolocator.getCurrentPosition(
-    desiredAccuracy: LocationAccuracy.high,
-  );
-  return {
-    "lat": position.latitude,
-    "lon": position.longitude,
-  };
+  Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+  return {"lat": position.latitude, "lon": position.longitude};
 }
 
-Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
+Future<Uint8List> bootstrapSession(String passphrase) async {
   String deviceId = await DeviceIdentity.getDeviceId();
   final loc = await getCurrentLocation();
   
@@ -438,29 +435,18 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
   final registerRes = await http.post(
     Uri.parse('https://192.168.1.2/register'),
     headers: {"Content-Type": "application/json"},
-    body: jsonEncode({
-      "device_id": deviceId,
-      "public_key": pubKeyBase64,
-    }),
+    body: jsonEncode({"device_id": deviceId, "public_key": pubKeyBase64}),
   );
-  
-  if (registerRes.statusCode != 200) {
-    throw Exception("Failed to register device with backend");
-  }
+  if (registerRes.statusCode != 200) throw Exception("Registration failed");
   
   final challengeRes = await http.post(
     Uri.parse('https://192.168.1.2/request-challenge'),
     headers: {"Content-Type": "application/json"},
-    body: jsonEncode({
-      "device_id": deviceId,
-      "lat": loc['lat'],
-      "lon": loc['lon']
-    }),
+    body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon']}),
   );
-  if (challengeRes.statusCode != 200) throw Exception("Failed to get challenge");
+  if (challengeRes.statusCode != 200) throw Exception("Challenge request failed");
   
   String challenge = jsonDecode(challengeRes.body)['challenge'];
-  
   String? privKeyBase64 = await DeviceIdentity.getPrivateKey();
   if (privKeyBase64 == null) throw Exception("Device identity not initialized");
   
@@ -470,61 +456,590 @@ Future<Uint8List> fetchAndDecryptImage(String passphrase) async {
     Uri.parse('https://192.168.1.2/verify'),
     headers: {"Content-Type": "application/json"},
     body: jsonEncode({
-      "device_id": deviceId,
-      "signature": base64Encode(sig),
-      "lat": loc['lat'],
-      "lon": loc['lon']
+      "device_id": deviceId, "signature": base64Encode(sig), "lat": loc['lat'], "lon": loc['lon']
     }),
   );
   if (verifyRes.statusCode != 200) throw Exception("Verification failed");
-  
-  final response = await http.post(
-    Uri.parse('https://192.168.1.2/'),
-    headers: {"Content-Type": "application/json"},
-    body: jsonEncode({
-      "device_id": deviceId,
-      "lat": loc['lat'],
-      "lon": loc['lon']
-    }),
-  );
 
-  if (response.statusCode != 200) {
-    throw Exception('Failed to fetch payload: ${response.statusCode}');
-  }
-
-  Uint8List fullPayload = response.bodyBytes;
-
-  Uint8List nonceBytes = fullPayload.sublist(0, 12);
-  Uint8List saltBytes = fullPayload.sublist(12, 28);
-  
-  Uint8List cipherTextBytes = fullPayload.sublist(28, fullPayload.length - 16);
-  Uint8List macBytes = fullPayload.sublist(fullPayload.length - 16);
-
-  final argon2 = Argon2id(
-    memory: 262144,
-    iterations: 3,
-    parallelism: 1,
-    hashLength: 32,
-  );
-
+  final argon2 = Argon2id(memory: 262144, iterations: 3, parallelism: 1, hashLength: 32);
   final derivedSecretKey = await argon2.deriveKey(
     secretKey: SecretKey(utf8.encode(passphrase)),
-    nonce: saltBytes, 
+    nonce: Uint8List(16),
   );
   
   final keyBytes = await derivedSecretKey.extractBytes();
+  return Uint8List.fromList(keyBytes);
+}
+
+/// ISOLATE: Decrypts JSON metadata nodes using MEK
+Future<dynamic> _decryptAndParseIsolate(Map<String, dynamic> args) async {
+  final Uint8List mek = args['mek'];
+  final Uint8List payload = args['payload'];
+
+  Uint8List nonceBytes = payload.sublist(0, 12);
+  Uint8List cipherTextBytes = payload.sublist(28, payload.length - 16); 
+  Uint8List macBytes = payload.sublist(payload.length - 16);
 
   final chachaCipher = Chacha20.poly1305Aead();
-  final secretBox = SecretBox(
-    cipherTextBytes, // This is now strictly the ciphertext without the MAC
-    nonce: nonceBytes,
-    mac: Mac(macBytes),
-  );
+  final secretBox = SecretBox(cipherTextBytes, nonce: nonceBytes, mac: Mac(macBytes));
 
-  final decryptedBytes = await chachaCipher.decrypt(
-    secretBox,
-    secretKey: SecretKey(keyBytes),
-  );
+  final decryptedBytes = await chachaCipher.decrypt(secretBox, secretKey: SecretKey(mek));
+  final decoded = jsonDecode(utf8.decode(decryptedBytes));
 
-  return Uint8List.fromList(decryptedBytes);
+  if (decoded is List) return decoded.map((e) => VfsNode.fromJson(e)).toList();
+  return VfsNode.fromJson(decoded);
+}
+
+/// ISOLATE: Encrypts JSON metadata nodes using MEK
+Future<Uint8List> _serializeAndEncryptIsolate(Map<String, dynamic> args) async {
+  final Uint8List mek = args['mek'];
+  final Map<String, dynamic> jsonNode = args['jsonNode'];
+
+  final plainText = utf8.encode(jsonEncode(jsonNode));
+  final chachaCipher = Chacha20.poly1305Aead();
+  final nonce = chachaCipher.newNonce();
+  final secretBox = await chachaCipher.encrypt(plainText, secretKey: SecretKey(mek), nonce: nonce);
+
+  final builder = BytesBuilder();
+  builder.add(secretBox.nonce);
+  builder.add(Uint8List(16));
+  builder.add(secretBox.cipherText);
+  builder.add(secretBox.mac.bytes);
+  return builder.toBytes();
+}
+
+/// ISOLATE: Encrypts raw binary chunks using the generated ChaCha20 Asset Key
+Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
+  final Uint8List key = args['key'];
+  final Uint8List data = args['data'];
+
+  final chachaCipher = Chacha20.poly1305Aead();
+  final nonce = chachaCipher.newNonce();
+  final secretBox = await chachaCipher.encrypt(data, secretKey: SecretKey(key), nonce: nonce);
+
+  final builder = BytesBuilder();
+  builder.add(secretBox.nonce);
+  builder.add(secretBox.cipherText);
+  builder.add(secretBox.mac.bytes);
+  return builder.toBytes();
+}
+
+/// NEW ISOLATE: Sequentially fetches raw chunk blobs, decrypts them with Asset Key, and concatenates
+Future<Uint8List> _downloadAndDecryptChunksIsolate(Map<String, dynamic> args) async {
+  // Required in isolate to bypass self-signed cert on 192.168.1.2
+  HttpOverrides.global = DevHttpOverrides(); 
+  
+  final List<String> pointers = List<String>.from(args['pointers']);
+  final Uint8List assetKey = args['assetKey'];
+  final String deviceId = args['deviceId'];
+  final double lat = args['lat'];
+  final double lon = args['lon'];
+
+  final builder = BytesBuilder();
+  final chachaCipher = Chacha20.poly1305Aead();
+
+  for (String ptr in pointers) {
+    final response = await http.post(
+      Uri.parse('https://192.168.1.2/payload/fetch'),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "device_id": deviceId,
+        "lat": lat,
+        "lon": lon,
+        "pointer": ptr
+      }),
+    );
+    
+    if (response.statusCode != 200) throw Exception("Failed to fetch chunk: $ptr");
+    
+    final payload = response.bodyBytes;
+    final nonceBytes = payload.sublist(0, 12);
+    // Raw chunks don't have the 16-byte dummy offset padding like metadata nodes do
+    final cipherTextBytes = payload.sublist(12, payload.length - 16);
+    final macBytes = payload.sublist(payload.length - 16);
+
+    final secretBox = SecretBox(cipherTextBytes, nonce: nonceBytes, mac: Mac(macBytes));
+    final decryptedBytes = await chachaCipher.decrypt(secretBox, secretKey: SecretKey(assetKey));
+    
+    builder.add(decryptedBytes);
+  }
+  
+  return builder.toBytes();
+}
+
+// -------------------------------------------------------------
+// MAIN GALLERY VIEW & INGESTION
+// -------------------------------------------------------------
+
+class GalleryGridView extends StatefulWidget {
+  final Uint8List mek;
+  const GalleryGridView({super.key, required this.mek});
+  @override
+  State<GalleryGridView> createState() => _GalleryGridViewState();
+}
+
+class _GalleryGridViewState extends State<GalleryGridView> {
+  bool _isLoading = true;
+  String _loadingText = "Fetching & Decrypting Gallery...";
+  List<VfsNode> _items = [];
+  String _error = "";
+  
+  // VFS Traversal State Machine
+  List<String> _navigationStack = [];
+  String _currentPointer = "root";
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchDirectory();
+  }
+
+  Future<void> _fetchDirectory() async {
+    setState(() { _isLoading = true; _loadingText = "Syncing Directory Tree..."; _error = ""; });
+
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      // 1. Fetch Current Directory Pointer
+      final response = await http.post(
+        Uri.parse('https://192.168.1.2/payload/fetch'), 
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": _currentPointer}),
+      );
+
+      if (response.statusCode == 404) {
+        setState(() { _items = []; _isLoading = false; });
+        return;
+      }
+      if (response.statusCode != 200) throw Exception('Failed to fetch directory: ${response.statusCode}');
+
+      // 2. Decrypt Directory Node
+      final dirNode = await compute(_decryptAndParseIsolate, {'mek': widget.mek, 'payload': response.bodyBytes});
+
+      // 3. Iteratively fetch and decrypt all children concurrently
+      if (dirNode is VfsDirectory) {
+        List<Future<VfsNode?>> fetchFutures = dirNode.pointers.map((ptr) async {
+           final childRes = await http.post(
+             Uri.parse('https://192.168.1.2/payload/fetch'),
+             headers: {"Content-Type": "application/json"},
+             body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": ptr}),
+           );
+           if (childRes.statusCode == 200) {
+              final childNode = await compute(_decryptAndParseIsolate, {'mek': widget.mek, 'payload': childRes.bodyBytes});
+              if (childNode is VfsNode) {
+                childNode.nodeId = ptr; // Inject pointer so UI knows what to fetch on tap
+                return childNode;
+              }
+           }
+           return null;
+        }).toList();
+
+        final results = await Future.wait(fetchFutures);
+        setState(() {
+          _items = results.whereType<VfsNode>().toList();
+          _isLoading = false;
+        });
+      } else {
+        setState(() {
+          _items = [];
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      setState(() { _error = e.toString(); _isLoading = false; });
+    }
+  }
+
+  void _navigateBack() {
+    if (_navigationStack.isNotEmpty) {
+      setState(() {
+        _currentPointer = _navigationStack.removeLast();
+      });
+      _fetchDirectory();
+    }
+  }
+
+  Future<void> _createFolder() async {
+    setState(() { _isLoading = true; _loadingText = "Creating Folder..."; });
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+      
+      // 1. Create and encrypt new folder node
+      final newFolderNode = VfsDirectory(metadata: {'n': 'New Folder'}, pointers: []);
+      final newFolderPointer = "dir_${const Uuid().v4().replaceAll('-', '')}";
+      final encryptedNewFolder = await compute(_serializeAndEncryptIsolate, {'mek': widget.mek, 'jsonNode': newFolderNode.toJson()});
+
+      await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+          "pointer": newFolderPointer, "base64_blob": base64Encode(encryptedNewFolder)
+        }),
+      );
+
+      // 2. Fetch current directory and append new folder pointer
+      final parentFetchRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/fetch'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": _currentPointer}),
+      );
+
+      if (parentFetchRes.statusCode == 200) {
+        final parentNode = await compute(_decryptAndParseIsolate, { 'mek': widget.mek, 'payload': parentFetchRes.bodyBytes });
+        if (parentNode is VfsDirectory) {
+          parentNode.pointers.add(newFolderPointer);
+          final updatedParentBlob = await compute(_serializeAndEncryptIsolate, { 'mek': widget.mek, 'jsonNode': parentNode.toJson() });
+
+          await http.post(
+            Uri.parse('https://192.168.1.2/payload/upload'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+              "pointer": _currentPointer, "base64_blob": base64Encode(updatedParentBlob)
+            }),
+          );
+        }
+      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Folder Created!'), backgroundColor: Colors.green));
+      _fetchDirectory();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to create folder: $e'), backgroundColor: Colors.red));
+      setState(() { _isLoading = false; });
+    }
+  }
+
+  Future<void> _initializeRootNode() async {
+    try {
+      final rootNode = VfsDirectory(metadata: {'n': 'My Encrypted Vault'}, pointers: []);
+      final encryptedBlob = await compute(_serializeAndEncryptIsolate, {'mek': widget.mek, 'jsonNode': rootNode.toJson()});
+
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      final response = await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+          "pointer": "root", "base64_blob": base64Encode(encryptedBlob)
+        }),
+      );
+
+      if (response.statusCode == 200 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Root Node Initialized!'), backgroundColor: Colors.green));
+        _fetchDirectory(); 
+      }
+    } catch (e) {
+      setState(() { _error = e.toString(); _isLoading = false; });
+    }
+  }
+
+  // Purely opens the native gallery and ingests the selected real image. 
+  // No dummy generators attached!
+  Future<void> _pickAndUploadImage() async {
+    final picker = ImagePicker();
+    final XFile? pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    
+    if (pickedFile == null) return; 
+
+    setState(() { _isLoading = true; _loadingText = "Chunking & Encrypting File in Isolates..."; });
+    try {
+      final File realFile = File(pickedFile.path);
+      
+      await _ingestImageFile(realFile, _currentPointer);
+      
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Upload Complete!'), backgroundColor: Colors.green));
+      _fetchDirectory();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: $e'), backgroundColor: Colors.red));
+      setState(() { _isLoading = false; });
+    }
+  }
+
+  Future<void> _ingestImageFile(File file, String parentPointer) async {
+    final random = Random.secure();
+    
+    // 32-byte secure Asset Key
+    final assetKey = Uint8List.fromList(List.generate(32, (_) => random.nextInt(256)));
+    
+    // Kept the 1x1 placeholder base64 for now to keep JSON minimal during localhost testing
+    final String thumbnailBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="; 
+
+    final int chunkSize = 4 * 1024 * 1024; // 4MB Streams
+    final int fileLength = await file.length();
+    List<String> chunkPointers = [];
+    
+    String deviceId = await DeviceIdentity.getDeviceId();
+    final loc = await getCurrentLocation();
+    
+    final raf = await file.open();
+    for (int i = 0; i < fileLength; i += chunkSize) {
+      final chunk = await raf.read(chunkSize);
+      final chunkPointer = "chk_${const Uuid().v4().replaceAll('-', '')}";
+      chunkPointers.add(chunkPointer);
+
+      final encryptedChunkBlob = await compute(_encryptChunkIsolate, { 'key': assetKey, 'data': chunk });
+
+      final res = await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+          "pointer": chunkPointer, "base64_blob": base64Encode(encryptedChunkBlob)
+        }),
+      );
+      if (res.statusCode != 200) throw Exception("Failed to upload chunk");
+    }
+    await raf.close();
+
+    final jpegNode = VfsJpeg(
+      metadata: { 'n': file.uri.pathSegments.last, 'tb': thumbnailBase64, 'k': base64Encode(assetKey) },
+      pointers: chunkPointers,
+    );
+
+    final jpegPointer = "node_${const Uuid().v4().replaceAll('-', '')}";
+    final encryptedJpegNode = await compute(_serializeAndEncryptIsolate, { 'mek': widget.mek, 'jsonNode': jpegNode.toJson() });
+
+    await http.post(
+      Uri.parse('https://192.168.1.2/payload/upload'),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+        "pointer": jpegPointer, "base64_blob": base64Encode(encryptedJpegNode)
+      }),
+    );
+
+    // Update Directory
+    final parentFetchRes = await http.post(
+      Uri.parse('https://192.168.1.2/payload/fetch'),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": parentPointer}),
+    );
+
+    if (parentFetchRes.statusCode == 200) {
+      final parentNode = await compute(_decryptAndParseIsolate, { 'mek': widget.mek, 'payload': parentFetchRes.bodyBytes });
+      if (parentNode is VfsDirectory) {
+        parentNode.pointers.add(jpegPointer);
+        final updatedParentBlob = await compute(_serializeAndEncryptIsolate, { 'mek': widget.mek, 'jsonNode': parentNode.toJson() });
+
+        await http.post(
+          Uri.parse('https://192.168.1.2/payload/upload'),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+            "pointer": parentPointer, "base64_blob": base64Encode(updatedParentBlob)
+          }),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: _navigationStack.isEmpty,
+      onPopInvoked: (didPop) {
+        if (didPop) return;
+        _navigateBack();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          title: Text(_currentPointer == "root" ? "Encrypted Gallery" : "Folder View", style: const TextStyle(color: Colors.tealAccent)),
+          backgroundColor: Colors.grey[900],
+          elevation: 0,
+          leading: _navigationStack.isNotEmpty
+              ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _navigateBack)
+              : null,
+          actions: [ 
+            IconButton(icon: const Icon(Icons.create_new_folder), onPressed: _createFolder),
+            IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchDirectory) 
+          ],
+        ),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _pickAndUploadImage,
+          backgroundColor: Colors.tealAccent,
+          icon: const Icon(Icons.add_photo_alternate, color: Colors.black),
+          label: const Text("Upload Image", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+        ),
+        body: _isLoading 
+        ? Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const CircularProgressIndicator(color: Colors.tealAccent),
+                const SizedBox(height: 16),
+                Text(_loadingText, style: const TextStyle(color: Colors.white54)),
+              ],
+            ),
+          )
+        : _error.isNotEmpty 
+        ? Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(_error, textAlign: TextAlign.center, style: const TextStyle(color: Colors.redAccent, fontSize: 16)),
+                  const SizedBox(height: 24),
+                  ElevatedButton.icon(
+                    onPressed: _initializeRootNode,
+                    icon: const Icon(Icons.create_new_folder),
+                    label: const Text("Initialize Root Node"),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                  )
+                ],
+              ),
+            ),
+          )
+        : _items.isEmpty 
+        ? const Center(child: Text("Vault is empty.", style: TextStyle(color: Colors.white54)))
+        : GridView.builder(
+          padding: const EdgeInsets.all(16),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2, crossAxisSpacing: 16, mainAxisSpacing: 16,
+          ),
+          itemCount: _items.length,
+          itemBuilder: (context, index) {
+            final item = _items[index];
+            Widget contentWidget;
+
+            if (item is VfsDirectory) {
+              contentWidget = Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.folder, size: 48, color: Colors.amber),
+                  const SizedBox(height: 8),
+                  Text(item.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  Text("${item.pointers.length} items", style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                ]
+              );
+            } else if (item is VfsJpeg) {
+              Widget imageWidget = const Icon(Icons.image, size: 48, color: Colors.blueAccent);
+              if (item.thumbnailBase64.isNotEmpty) {
+                try {
+                  imageWidget = Image.memory(base64Decode(item.thumbnailBase64), fit: BoxFit.cover, width: double.infinity);
+                } catch (_) {}
+              }
+              contentWidget = Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: ClipRRect(borderRadius: const BorderRadius.vertical(top: Radius.circular(12)), child: imageWidget)),
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text(item.name, style: const TextStyle(color: Colors.white, fontSize: 12), overflow: TextOverflow.ellipsis, textAlign: TextAlign.center),
+                  )
+                ]
+              );
+            } else {
+              contentWidget = const Center(child: Text("Unknown node", style: TextStyle(color: Colors.white54)));
+            }
+
+            return InkWell(
+              onTap: () {
+                if (item is VfsDirectory) {
+                  setState(() {
+                    _navigationStack.add(_currentPointer);
+                    _currentPointer = item.nodeId;
+                  });
+                  _fetchDirectory();
+                } else if (item is VfsJpeg) {
+                  Navigator.push(context, MaterialPageRoute(
+                    builder: (context) => ImageViewerScreen(item: item)
+                  ));
+                }
+              },
+              child: Card(color: Colors.grey[850], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), child: contentWidget),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// IMAGE VIEWER SCREEN (Read Pipeline)
+// -------------------------------------------------------------
+
+class ImageViewerScreen extends StatefulWidget {
+  final VfsJpeg item;
+  const ImageViewerScreen({super.key, required this.item});
+
+  @override
+  State<ImageViewerScreen> createState() => _ImageViewerScreenState();
+}
+
+class _ImageViewerScreenState extends State<ImageViewerScreen> {
+  Uint8List? _highResBytes;
+  String _error = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchAndDecryptFullImage();
+  }
+
+  Future<void> _fetchAndDecryptFullImage() async {
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+      final Uint8List assetKey = base64Decode(widget.item.assetKey);
+
+      // Offload sequential networking and stream decryption to the new Isolate
+      final assembledBytes = await compute(_downloadAndDecryptChunksIsolate, {
+        'pointers': widget.item.pointers,
+        'assetKey': assetKey,
+        'deviceId': deviceId,
+        'lat': loc['lat'],
+        'lon': loc['lon'],
+      });
+
+      setState(() {
+        _highResBytes = assembledBytes;
+      });
+    } catch (e) {
+      setState(() {
+        _error = e.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text(widget.item.name, style: const TextStyle(color: Colors.white, fontSize: 14)),
+        backgroundColor: Colors.black,
+        elevation: 0,
+      ),
+      body: Center(
+        child: _error.isNotEmpty
+            ? Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text('Decryption Error: $_error', style: const TextStyle(color: Colors.redAccent)),
+              )
+            : _highResBytes == null
+                ? const Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      CircularProgressIndicator(color: Colors.blueAccent),
+                      SizedBox(height: 16),
+                      Text("Streaming Encrypted Chunks...", style: TextStyle(color: Colors.white54)),
+                    ],
+                  )
+                : Image.memory(
+                    _highResBytes!,
+                    fit: BoxFit.contain,
+                    // Note: If you test with the "Dummy File" upload from the gallery, it uses 
+                    // mathematically random bytes to simulate a file, which Flutter's Image.memory() 
+                    // won't recognize as a valid JPEG visually. It will just show a blank layout box.
+                  ),
+      ),
+    );
+  }
 }
