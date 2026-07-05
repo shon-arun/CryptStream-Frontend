@@ -148,17 +148,57 @@ class BiometricGate extends StatefulWidget {
 class _BiometricGateState extends State<BiometricGate> {
   final LocalAuthentication auth = LocalAuthentication();
   bool _isAuthenticated = false;
-  String _statusMessage = "Authentication Required";
+  String _statusMessage = "Initializing Security Enclave...";
+  String _lockoutReason = "";
 
   @override
   void initState() {
     super.initState();
-    _initializeIdentity();
-    _authenticate();
+    _bootstrapEnclave();
+  }
+
+  Future<void> _bootstrapEnclave() async {
+    try {
+      await _verifyLocationEnclave();
+      await _initializeIdentity();
+      await _authenticate();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _lockoutReason = e.toString().replaceFirst('Exception: ', '');
+        });
+      }
+    }
+  }
+
+  Future<void> _verifyLocationEnclave() async {
+    setState(() => _statusMessage = "Verifying GPS Hardware...");
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      throw Exception("GPS hardware is disabled. Geofence cannot be verified.");
+    }
+
+    setState(() => _statusMessage = "Verifying OS Permissions...");
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        throw Exception("Location permissions denied. Geofence cannot be verified.");
+      }
+    }
+    
+    if (permission == LocationPermission.deniedForever) {
+      throw Exception("Location permissions permanently denied. Geofence cannot be verified.");
+    }
+
+    setState(() => _statusMessage = "Acquiring Enclave Coordinates...");
+    // Force a high-accuracy read to ensure hardware is actively functioning
+    await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
   }
 
   Future<void> _initializeIdentity() async {
     try {
+      setState(() => _statusMessage = "Verifying Identity Keys...");
       await DeviceIdentity.generateAndStoreKeys();
     } catch (e) {
       print("Error generating device identity: $e");
@@ -168,12 +208,11 @@ class _BiometricGateState extends State<BiometricGate> {
   Future<void> _authenticate() async {
     bool authenticated = false;
     try {
-      setState(() => _statusMessage = "Scanning...");
+      setState(() => _statusMessage = "Scanning Biometrics...");
       final bool canAuthenticate = await auth.canCheckBiometrics || await auth.isDeviceSupported();
 
       if (!canAuthenticate) {
-        setState(() => _statusMessage = "Biometric hardware not available or not configured.");
-        return;
+        throw Exception("Biometric hardware not available or not configured.");
       }
 
       authenticated = await auth.authenticate(
@@ -181,7 +220,10 @@ class _BiometricGateState extends State<BiometricGate> {
         options: const AuthenticationOptions(stickyAuth: true, biometricOnly: true),
       );
     } on PlatformException catch (e) {
-      setState(() => _statusMessage = "Error: ${e.message}");
+      if (mounted) setState(() => _lockoutReason = "Biometric Error: ${e.message}");
+      return;
+    } catch (e) {
+      if (mounted) setState(() => _lockoutReason = e.toString().replaceFirst('Exception: ', ''));
       return;
     }
 
@@ -193,13 +235,47 @@ class _BiometricGateState extends State<BiometricGate> {
         _statusMessage = "Authenticated Successfully";
       });
     } else {
-      setState(() => _statusMessage = "Authentication Failed. Try again.");
+      setState(() => _lockoutReason = "Authentication Failed. Access Denied.");
     }
   }
 
   @override
   Widget build(BuildContext context) {
     if (_isAuthenticated) return const PassphraseGate();
+
+    if (_lockoutReason.isNotEmpty) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.gpp_bad, size: 80, color: Colors.red),
+                const SizedBox(height: 24),
+                const Text("HARD LOCKOUT", style: TextStyle(color: Colors.red, fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 2)),
+                const SizedBox(height: 16),
+                Text(_lockoutReason, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 16)),
+                const SizedBox(height: 36),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    setState(() { _lockoutReason = ""; });
+                    _bootstrapEnclave();
+                  },
+                  icon: const Icon(Icons.refresh),
+                  label: const Text("Retry Boot Sequence"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[900], foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
       backgroundColor: Colors.grey[900],
@@ -209,19 +285,11 @@ class _BiometricGateState extends State<BiometricGate> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.lock_outline, size: 80, color: Colors.redAccent),
+              const Icon(Icons.security, size: 80, color: Colors.tealAccent),
+              const SizedBox(height: 32),
+              const CircularProgressIndicator(color: Colors.tealAccent),
               const SizedBox(height: 24),
-              Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 18)),
-              const SizedBox(height: 36),
-              ElevatedButton.icon(
-                onPressed: _authenticate,
-                icon: const Icon(Icons.fingerprint),
-                label: const Text("Retry Scan"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.redAccent, foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                ),
-              ),
+              Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16)),
             ],
           ),
         ),
@@ -1035,9 +1103,6 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
                 : Image.memory(
                     _highResBytes!,
                     fit: BoxFit.contain,
-                    // Note: If you test with the "Dummy File" upload from the gallery, it uses 
-                    // mathematically random bytes to simulate a file, which Flutter's Image.memory() 
-                    // won't recognize as a valid JPEG visually. It will just show a blank layout box.
                   ),
       ),
     );
