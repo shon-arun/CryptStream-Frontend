@@ -267,14 +267,16 @@ class _BiometricGateState extends State<BiometricGate> {
         ),
       );
     } on PlatformException catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() => _lockoutReason = "Biometric Error: ${e.message}");
+      }
       return;
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(
           () => _lockoutReason = e.toString().replaceFirst('Exception: ', ''),
         );
+      }
       return;
     }
 
@@ -671,8 +673,10 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
       "lon": loc['lon'],
     }),
   );
-  if (challengeRes.statusCode != 200)
+  if (challengeRes.statusCode != 200){
     throw Exception("Challenge request failed");
+  }
+
 
   String challenge = jsonDecode(challengeRes.body)['challenge'];
   String? privKeyBase64 = await DeviceIdentity.getPrivateKey();
@@ -793,7 +797,9 @@ Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(Map<String, dynamic> args) 
     }),
   );
 
-  if (response.statusCode != 200) throw Exception("Failed to fetch chunk: $ptr");
+  if (response.statusCode != 200) {
+    throw Exception("Failed to fetch chunk: $ptr");
+  }
 
   final payload = response.bodyBytes;
   final nonceBytes = payload.sublist(0, 12);
@@ -841,8 +847,9 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(
       }),
     );
 
-    if (response.statusCode != 200)
+    if (response.statusCode != 200){
       throw Exception("Failed to fetch chunk: $ptr");
+    }
 
     final payload = response.bodyBytes;
     final nonceBytes = payload.sublist(0, 12);
@@ -1051,8 +1058,9 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         });
         return;
       }
-      if (response.statusCode != 200)
+      if (response.statusCode != 200) {
         throw Exception('Failed to fetch directory: ${response.statusCode}');
+      }
 
       final dirNode = await compute(_decryptAndParseIsolate, {
         'mek': widget.mek,
@@ -1233,22 +1241,24 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           );
         }
       }
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Folder Created!'),
             backgroundColor: Colors.green,
           ),
         );
+      }
       _fetchDirectory();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to create folder: $e'),
             backgroundColor: Colors.red,
           ),
         );
+      }
       setState(() {
         _isLoading = false;
       });
@@ -1313,22 +1323,24 @@ class _GalleryGridViewState extends State<GalleryGridView> {
 
       await _ingestMediaFile(realFile, _currentPointer);
 
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Upload Complete!'),
             backgroundColor: Colors.green,
           ),
         );
+      }
       _fetchDirectory();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Upload failed: $e'),
             backgroundColor: Colors.red,
           ),
         );
+      }
       setState(() {
         _isLoading = false;
       });
@@ -1381,10 +1393,11 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           "base64_blob": base64Encode(encryptedChunkBlob),
         }),
       );
-      if (res.statusCode != 200)
+      if (res.statusCode != 200) {
         throw Exception(
           "Server rejected chunk with status ${res.statusCode}: ${res.body}",
         );
+      }
     }
     await raf.close();
 
@@ -1543,13 +1556,14 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         );
       _fetchDirectory();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Delete failed: $e'),
             backgroundColor: Colors.red,
           ),
         );
+      }
       setState(() {
         _isLoading = false;
       });
