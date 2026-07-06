@@ -224,11 +224,13 @@ class _BiometricGateState extends State<BiometricGate> {
   }
 
   Future<void> _initializeIdentity() async {
+    setState(() => _statusMessage = "Verifying Identity Keys...");
     try {
-      setState(() => _statusMessage = "Verifying Identity Keys...");
       await DeviceIdentity.generateAndStoreKeys();
     } catch (e) {
-      print("Error generating device identity: $e");
+      // Re-throw with a clear prefix so the State Machine catches it 
+      // and triggers the visual Hard Lockout UI instead of failing silently.
+      throw Exception("Identity Generation Failed: $e");
     }
   }
 
