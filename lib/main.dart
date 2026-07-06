@@ -883,8 +883,8 @@ Future<String> _generateThumbnailIsolate(String filePath) async {
   final img.Image? decodedImage = img.decodeImage(fileBytes);
   if (decodedImage == null) return "";
 
-  final img.Image resized = img.copyResize(decodedImage, width: 150);
-  final List<int> compressedJpg = img.encodeJpg(resized, quality: 60);
+  final img.Image resized = img.copyResize(decodedImage, width: 400);
+  final List<int> compressedJpg = img.encodeJpg(resized, quality: 85);
 
   return base64Encode(compressedJpg);
 }
