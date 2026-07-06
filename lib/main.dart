@@ -13,7 +13,8 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 import 'dart:math';
 import 'package:path_provider/path_provider.dart';
-import 'package:image_picker/image_picker.dart'; 
+import 'package:image_picker/image_picker.dart';
+import 'package:image/image.dart' as img; // ADD THIS IMPORT
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -682,6 +683,25 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(Map<String, dynamic> args) as
   return builder.toBytes();
 }
 
+/// NEW ISOLATE: Decodes a full image from disk, downscales it to ~150px, compresses it, and encodes to Base64
+Future<String> _generateThumbnailIsolate(String filePath) async {
+  // Read raw bytes from disk
+  final fileBytes = await File(filePath).readAsBytes();
+  
+  // Decode the image (this is memory/CPU intensive, which is why it's in an isolate)
+  final img.Image? decodedImage = img.decodeImage(fileBytes);
+  if (decodedImage == null) return ""; // Fallback for unsupported formats
+
+  // Downscale to a max width of 150 pixels, automatically scaling height to maintain aspect ratio
+  final img.Image resized = img.copyResize(decodedImage, width: 150);
+
+  // Compress to JPEG with a quality of 60 (usually hits the 5-20kb sweet spot for thumbnails)
+  final List<int> compressedJpg = img.encodeJpg(resized, quality: 60);
+
+  // Convert to Base64 string for embedding into the VFS JSON Node
+  return base64Encode(compressedJpg);
+}
+
 // -------------------------------------------------------------
 // MAIN GALLERY VIEW & INGESTION
 // -------------------------------------------------------------
@@ -852,7 +872,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     
     if (pickedFile == null) return; 
 
-    setState(() { _isLoading = true; _loadingText = "Chunking & Encrypting File in Isolates..."; });
+    setState(() { _isLoading = true; _loadingText = "Generating Thumbnail & Encrypting..."; });
     try {
       final File realFile = File(pickedFile.path);
       
@@ -870,7 +890,9 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     final random = Random.secure();
     
     final assetKey = Uint8List.fromList(List.generate(32, (_) => random.nextInt(256)));
-    final String thumbnailBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="; 
+    
+    // Offload thumbnail generation to the background isolate
+    final String thumbnailBase64 = await compute(_generateThumbnailIsolate, file.path);
 
     final int chunkSize = 4 * 1024 * 1024; // 4MB Streams
     final int fileLength = await file.length();
