@@ -13,7 +13,7 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 import 'dart:math';
 import 'package:path_provider/path_provider.dart';
-import 'package:image_picker/image_picker.dart'; // ADD THIS IMPORT
+import 'package:image_picker/image_picker.dart'; 
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -24,8 +24,8 @@ void main() {
       home: BiometricGate(),
     ),
   );
-
-  LocationHeartbeat.start();
+  // Note: LocationHeartbeat.start() removed from main() to prevent aggressive early permission prompts.
+  // It is now strictly managed by the PassphraseGate lifecycle.
 }
 
 class DevHttpOverrides extends HttpOverrides {
@@ -38,47 +38,70 @@ class DevHttpOverrides extends HttpOverrides {
   }
 }
 
+// -------------------------------------------------------------
+// CENTRALIZED LOCATION STREAM CACHE
+// -------------------------------------------------------------
+class LocationService {
+  static Position? currentPosition;
+  static StreamSubscription<Position>? _positionStreamSubscription;
+
+  static Future<void> startStream() async {
+    if (_positionStreamSubscription != null) return;
+
+    // Force an initial high-accuracy lock to guarantee a baseline coordinate
+    currentPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+
+    // Keep the hardware "warm" and actively listening for changes > 5 meters
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5, 
+    );
+
+    _positionStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings).listen((Position position) {
+      currentPosition = position;
+    });
+  }
+
+  static void stopStream() {
+    _positionStreamSubscription?.cancel();
+    _positionStreamSubscription = null;
+  }
+}
+
 class LocationHeartbeat {
   static Timer? _timer;
   static VoidCallback? onForbidden;
 
   static void start() {
+    if (_timer != null) return;
     _timer = Timer.periodic(const Duration(seconds: 10), (timer) async {
       try {
-        LocationPermission permission = await Geolocator.checkPermission();
-        if (permission == LocationPermission.denied) {
-          permission = await Geolocator.requestPermission();
-        }
+        if (LocationService.currentPosition == null) return;
+        
+        String deviceId = await DeviceIdentity.getDeviceId();
+        
+        final response = await http.post(
+          Uri.parse('https://192.168.1.2/heartbeat'),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "device_id": deviceId,
+            "lat": LocationService.currentPosition!.latitude,
+            "lon": LocationService.currentPosition!.longitude
+          }),
+        );
 
-        if (permission == LocationPermission.whileInUse || 
-            permission == LocationPermission.always) {
-          
-          Position position = await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high
-          );
-          
-          String deviceId = await DeviceIdentity.getDeviceId();
-          
-          final response = await http.post(
-            Uri.parse('https://192.168.1.2/heartbeat'),
-            headers: {"Content-Type": "application/json"},
-            body: jsonEncode({
-              "device_id": deviceId,
-              "lat": position.latitude,
-              "lon": position.longitude
-            }),
-          );
-
-          if (response.statusCode == 403) {
-            onForbidden?.call();
-          }
+        if (response.statusCode == 403) {
+          onForbidden?.call();
         }
-      } catch (e) { }
+      } catch (e) { 
+        // Silently fail network drops in background
+      }
     });
   }
 
   static void stop() {
     _timer?.cancel();
+    _timer = null;
   }
 }
 
@@ -191,9 +214,13 @@ class _BiometricGateState extends State<BiometricGate> {
       throw Exception("Location permissions permanently denied. Geofence cannot be verified.");
     }
 
-    setState(() => _statusMessage = "Acquiring Enclave Coordinates...");
-    // Force a high-accuracy read to ensure hardware is actively functioning
-    await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    setState(() => _statusMessage = "Acquiring Enclave Coordinates (Stream)...");
+    
+    // Connects to the hardware and binds the background coordinate stream
+    await LocationService.startStream();
+    if (LocationService.currentPosition == null) {
+      throw Exception("Failed to acquire initial coordinate lock.");
+    }
   }
 
   Future<void> _initializeIdentity() async {
@@ -308,16 +335,21 @@ class _PassphraseGateState extends State<PassphraseGate> {
   final TextEditingController _controller = TextEditingController();
   bool _isBootstrapping = false;
   String _errorMessage = "";
+  Future<Uint8List>? _bootstrapFuture; 
 
   @override
   void initState() {
     super.initState();
+    // Start background geofence heartbeat ONLY once securely inside the app
+    LocationHeartbeat.start(); 
+    
     LocationHeartbeat.onForbidden = () {
       if (mounted && _isBootstrapping) {
         setState(() {
           _isBootstrapping = false;
           _errorMessage = "Access denied: Out of bounds. Session locked.";
           _controller.clear();
+          _bootstrapFuture = null; 
         });
       }
     };
@@ -325,7 +357,11 @@ class _PassphraseGateState extends State<PassphraseGate> {
 
   void _submitPassphrase() {
     if (_controller.text.isNotEmpty) {
-      setState(() { _isBootstrapping = true; _errorMessage = ""; });
+      setState(() { 
+        _isBootstrapping = true; 
+        _errorMessage = ""; 
+        _bootstrapFuture = bootstrapSession(_controller.text); 
+      });
     } else {
       setState(() => _errorMessage = "Please enter a passphrase");
     }
@@ -334,6 +370,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
   @override
   void dispose() {
     _controller.dispose();
+    LocationHeartbeat.stop(); // Stop heartbeat if gateway destroyed
     super.dispose();
   }
 
@@ -344,7 +381,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
         backgroundColor: Colors.black,
         body: Center(
           child: FutureBuilder<Uint8List>(
-            future: bootstrapSession(_controller.text),
+            future: _bootstrapFuture, 
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Column(
@@ -365,7 +402,11 @@ class _PassphraseGateState extends State<PassphraseGate> {
                       const SizedBox(height: 24),
                       ElevatedButton(
                         onPressed: () {
-                          setState(() { _isBootstrapping = false; _controller.clear(); });
+                          setState(() { 
+                            _isBootstrapping = false; 
+                            _controller.clear(); 
+                            _bootstrapFuture = null; 
+                          });
                         },
                         child: const Text("Try Again"),
                       )
@@ -488,9 +529,15 @@ Future<Uint8List> signChallenge(String challenge, String privateKeyBase64) async
   return Uint8List.fromList(signature.bytes);
 }
 
+// Instantly returns the cached coordinate from the Stream Listener (Zero Latency)
 Future<Map<String, double>> getCurrentLocation() async {
-  Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-  return {"lat": position.latitude, "lon": position.longitude};
+  if (LocationService.currentPosition == null) {
+    LocationService.currentPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+  }
+  return {
+    "lat": LocationService.currentPosition!.latitude, 
+    "lon": LocationService.currentPosition!.longitude
+  };
 }
 
 Future<Uint8List> bootstrapSession(String passphrase) async {
@@ -507,7 +554,6 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
   );
   if (registerRes.statusCode != 200) throw Exception("Registration failed");
   
-  // Extract the unique secure vault salt from the backend
   final registerData = jsonDecode(registerRes.body);
   final String vaultSaltB64 = registerData['vault_salt'];
   final Uint8List vaultSalt = base64Decode(vaultSaltB64);
@@ -537,14 +583,13 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
   final argon2 = Argon2id(memory: 262144, iterations: 3, parallelism: 1, hashLength: 32);
   final derivedSecretKey = await argon2.deriveKey(
     secretKey: SecretKey(utf8.encode(passphrase)),
-    nonce: vaultSalt, // Use the dynamically fetched unique vault salt
+    nonce: vaultSalt, 
   );
   
   final keyBytes = await derivedSecretKey.extractBytes();
   return Uint8List.fromList(keyBytes);
 }
 
-/// ISOLATE: Decrypts JSON metadata nodes using MEK
 Future<dynamic> _decryptAndParseIsolate(Map<String, dynamic> args) async {
   final Uint8List mek = args['mek'];
   final Uint8List payload = args['payload'];
@@ -563,7 +608,6 @@ Future<dynamic> _decryptAndParseIsolate(Map<String, dynamic> args) async {
   return VfsNode.fromJson(decoded);
 }
 
-/// ISOLATE: Encrypts JSON metadata nodes using MEK
 Future<Uint8List> _serializeAndEncryptIsolate(Map<String, dynamic> args) async {
   final Uint8List mek = args['mek'];
   final Map<String, dynamic> jsonNode = args['jsonNode'];
@@ -581,7 +625,6 @@ Future<Uint8List> _serializeAndEncryptIsolate(Map<String, dynamic> args) async {
   return builder.toBytes();
 }
 
-/// ISOLATE: Encrypts raw binary chunks using the generated ChaCha20 Asset Key
 Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
   final Uint8List key = args['key'];
   final Uint8List data = args['data'];
@@ -597,9 +640,7 @@ Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
   return builder.toBytes();
 }
 
-/// NEW ISOLATE: Sequentially fetches raw chunk blobs, decrypts them with Asset Key, and concatenates
 Future<Uint8List> _downloadAndDecryptChunksIsolate(Map<String, dynamic> args) async {
-  // Required in isolate to bypass self-signed cert on 192.168.1.2
   HttpOverrides.global = DevHttpOverrides(); 
   
   final List<String> pointers = List<String>.from(args['pointers']);
@@ -627,7 +668,6 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(Map<String, dynamic> args) as
     
     final payload = response.bodyBytes;
     final nonceBytes = payload.sublist(0, 12);
-    // Raw chunks don't have the 16-byte dummy offset padding like metadata nodes do
     final cipherTextBytes = payload.sublist(12, payload.length - 16);
     final macBytes = payload.sublist(payload.length - 16);
 
@@ -657,7 +697,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
   List<VfsNode> _items = [];
   String _error = "";
   
-  // VFS Traversal State Machine
   List<String> _navigationStack = [];
   String _currentPointer = "root";
 
@@ -674,7 +713,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       String deviceId = await DeviceIdentity.getDeviceId();
       final loc = await getCurrentLocation();
 
-      // 1. Fetch Current Directory Pointer
       final response = await http.post(
         Uri.parse('https://192.168.1.2/payload/fetch'), 
         headers: {"Content-Type": "application/json"},
@@ -687,10 +725,8 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       }
       if (response.statusCode != 200) throw Exception('Failed to fetch directory: ${response.statusCode}');
 
-      // 2. Decrypt Directory Node
       final dirNode = await compute(_decryptAndParseIsolate, {'mek': widget.mek, 'payload': response.bodyBytes});
 
-      // 3. Iteratively fetch and decrypt all children concurrently
       if (dirNode is VfsDirectory) {
         List<Future<VfsNode?>> fetchFutures = dirNode.pointers.map((ptr) async {
            final childRes = await http.post(
@@ -701,7 +737,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
            if (childRes.statusCode == 200) {
               final childNode = await compute(_decryptAndParseIsolate, {'mek': widget.mek, 'payload': childRes.bodyBytes});
               if (childNode is VfsNode) {
-                childNode.nodeId = ptr; // Inject pointer so UI knows what to fetch on tap
+                childNode.nodeId = ptr; 
                 return childNode;
               }
            }
@@ -739,7 +775,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       String deviceId = await DeviceIdentity.getDeviceId();
       final loc = await getCurrentLocation();
       
-      // 1. Create and encrypt new folder node
       final newFolderNode = VfsDirectory(metadata: {'n': 'New Folder'}, pointers: []);
       final newFolderPointer = "dir_${const Uuid().v4().replaceAll('-', '')}";
       final encryptedNewFolder = await compute(_serializeAndEncryptIsolate, {'mek': widget.mek, 'jsonNode': newFolderNode.toJson()});
@@ -753,7 +788,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         }),
       );
 
-      // 2. Fetch current directory and append new folder pointer
       final parentFetchRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/fetch'),
         headers: {"Content-Type": "application/json"},
@@ -810,8 +844,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
-  // Purely opens the native gallery and ingests the selected real image. 
-  // No dummy generators attached!
   Future<void> _pickAndUploadImage() async {
     final picker = ImagePicker();
     final XFile? pickedFile = await picker.pickImage(source: ImageSource.gallery);
@@ -835,10 +867,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
   Future<void> _ingestImageFile(File file, String parentPointer) async {
     final random = Random.secure();
     
-    // 32-byte secure Asset Key
     final assetKey = Uint8List.fromList(List.generate(32, (_) => random.nextInt(256)));
-    
-    // Kept the 1x1 placeholder base64 for now to keep JSON minimal during localhost testing
     final String thumbnailBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="; 
 
     final int chunkSize = 4 * 1024 * 1024; // 4MB Streams
@@ -885,7 +914,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       }),
     );
 
-    // Update Directory
     final parentFetchRes = await http.post(
       Uri.parse('https://192.168.1.2/payload/fetch'),
       headers: {"Content-Type": "application/json"},
@@ -1062,7 +1090,6 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
       final loc = await getCurrentLocation();
       final Uint8List assetKey = base64Decode(widget.item.assetKey);
 
-      // Offload sequential networking and stream decryption to the new Isolate
       final assembledBytes = await compute(_downloadAndDecryptChunksIsolate, {
         'pointers': widget.item.pointers,
         'assetKey': assetKey,
