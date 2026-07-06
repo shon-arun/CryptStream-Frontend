@@ -315,9 +315,9 @@ class _BiometricGateState extends State<BiometricGate> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.security, size: 80, color: Colors.tealAccent),
+              const Icon(Icons.security, size: 80, color: Colors.redAccent),
               const SizedBox(height: 32),
-              const CircularProgressIndicator(color: Colors.tealAccent),
+              const CircularProgressIndicator(color: Colors.redAccent),
               const SizedBox(height: 24),
               Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16)),
             ],
@@ -390,7 +390,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
                 return const Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    CircularProgressIndicator(color: Colors.tealAccent),
+                    CircularProgressIndicator(color: Colors.redAccent),
                     SizedBox(height: 24),
                     Text("Deriving Master Encryption Key (Argon2id)...\nPlease wait.", textAlign: TextAlign.center, style: TextStyle(color: Colors.white70))
                   ],
@@ -1039,7 +1039,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       child: Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
-          title: Text(_currentPointer == "root" ? "Encrypted Gallery" : "Folder View", style: const TextStyle(color: Colors.tealAccent)),
+          title: Text(_currentPointer == "root" ? "Encrypted Gallery" : "Folder View", style: const TextStyle(color: Colors.redAccent)),
           backgroundColor: Colors.grey[900],
           elevation: 0,
           leading: _navigationStack.isNotEmpty
@@ -1052,7 +1052,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         ),
         floatingActionButton: FloatingActionButton.extended(
           onPressed: _pickAndUploadImage,
-          backgroundColor: Colors.tealAccent,
+          backgroundColor: Colors.redAccent,
           icon: const Icon(Icons.add_photo_alternate, color: Colors.black),
           label: const Text("Upload Image", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
         ),
@@ -1061,7 +1061,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const CircularProgressIndicator(color: Colors.tealAccent),
+                const CircularProgressIndicator(color: Colors.redAccent),
                 const SizedBox(height: 16),
                 Text(_loadingText, style: const TextStyle(color: Colors.white54)),
               ],
