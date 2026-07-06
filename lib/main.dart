@@ -741,6 +741,10 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": _currentPointer}),
       );
 
+      if (response.statusCode == 404 && _currentPointer == "root") {
+        setState(() { _items = []; _isLoading = false; _error = "Vault not initialized."; });
+        return;
+      }
       if (response.statusCode == 404) {
         setState(() { _items = []; _isLoading = false; });
         return;
@@ -798,7 +802,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       final loc = await getCurrentLocation();
       
       final newFolderNode = VfsDirectory(metadata: {'n': 'New Folder'}, pointers: []);
-      final newFolderPointer = "dir_${const Uuid().v4().replaceAll('-', '')}";
+      final newFolderPointer = "${const Uuid().v4().replaceAll('-', '')}";
       final encryptedNewFolder = await compute(_serializeAndEncryptIsolate, {'mek': widget.mek, 'jsonNode': newFolderNode.toJson()});
 
       await http.post(
@@ -894,7 +898,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     // Offload thumbnail generation to the background isolate
     final String thumbnailBase64 = await compute(_generateThumbnailIsolate, file.path);
 
-    final int chunkSize = 4 * 1024 * 1024; // 4MB Streams
+    final int chunkSize = 512 * 1024;
     final int fileLength = await file.length();
     List<String> chunkPointers = [];
     
@@ -904,7 +908,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     final raf = await file.open();
     for (int i = 0; i < fileLength; i += chunkSize) {
       final chunk = await raf.read(chunkSize);
-      final chunkPointer = "chk_${const Uuid().v4().replaceAll('-', '')}";
+      final chunkPointer = "${const Uuid().v4().replaceAll('-', '')}";
       chunkPointers.add(chunkPointer);
 
       final encryptedChunkBlob = await compute(_encryptChunkIsolate, { 'key': assetKey, 'data': chunk });
@@ -917,7 +921,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           "pointer": chunkPointer, "base64_blob": base64Encode(encryptedChunkBlob)
         }),
       );
-      if (res.statusCode != 200) throw Exception("Failed to upload chunk");
+      if (res.statusCode != 200) throw Exception("Server rejected chunk with status ${res.statusCode}: ${res.body}");
     }
     await raf.close();
 
@@ -926,7 +930,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       pointers: chunkPointers,
     );
 
-    final jpegPointer = "node_${const Uuid().v4().replaceAll('-', '')}";
+    final jpegPointer = "${const Uuid().v4().replaceAll('-', '')}";
     final encryptedJpegNode = await compute(_serializeAndEncryptIsolate, { 'mek': widget.mek, 'jsonNode': jpegNode.toJson() });
 
     await http.post(
