@@ -13,7 +13,7 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 import 'dart:math';
 import 'package:image_picker/image_picker.dart';
-import 'package:image/image.dart' as img; // ADD THIS IMPORT
+import 'package:image/image.dart' as img;
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -580,6 +580,7 @@ abstract class VfsNode {
 
     if (t == 'd') return VfsDirectory(metadata: m, pointers: p);
     if (t == 'j') return VfsJpeg(metadata: m, pointers: p);
+    if (t == 'v') return VfsVideo(metadata: m, pointers: p);
     return VfsGeneric(type: t, metadata: m, pointers: p);
   }
 
@@ -604,6 +605,14 @@ class VfsJpeg extends VfsNode {
   VfsJpeg({required super.metadata, required super.pointers})
     : super(type: 'j');
   String get name => metadata['n'] ?? 'Unnamed Image';
+  String get thumbnailBase64 => metadata['tb'] ?? '';
+  String get assetKey => metadata['k'] ?? '';
+}
+
+class VfsVideo extends VfsNode {
+  VfsVideo({required super.metadata, required super.pointers})
+    : super(type: 'v');
+  String get name => metadata['n'] ?? 'Unnamed Video';
   String get thumbnailBase64 => metadata['tb'] ?? '';
   String get assetKey => metadata['k'] ?? '';
 }
@@ -1146,22 +1155,21 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
-  Future<void> _pickAndUploadImage() async {
+  Future<void> _pickAndUploadMedia() async {
     final picker = ImagePicker();
-    final XFile? pickedFile = await picker.pickImage(
-      source: ImageSource.gallery,
-    );
+    // Allow selection of both images and videos
+    final XFile? pickedFile = await picker.pickMedia();
 
     if (pickedFile == null) return;
 
     setState(() {
       _isLoading = true;
-      _loadingText = "Generating Thumbnail & Encrypting...";
+      _loadingText = "Processing & Encrypting Media...";
     });
     try {
       final File realFile = File(pickedFile.path);
 
-      await _ingestImageFile(realFile, _currentPointer);
+      await _ingestMediaFile(realFile, _currentPointer);
 
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1185,18 +1193,23 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
-  Future<void> _ingestImageFile(File file, String parentPointer) async {
+  Future<void> _ingestMediaFile(File file, String parentPointer) async {
     final random = Random.secure();
 
     final assetKey = Uint8List.fromList(
       List.generate(32, (_) => random.nextInt(256)),
     );
 
-    // Offload thumbnail generation to the background isolate
-    final String thumbnailBase64 = await compute(
-      _generateThumbnailIsolate,
-      file.path,
-    );
+    final bool isVideo = file.path.toLowerCase().endsWith('.mp4') || file.path.toLowerCase().endsWith('.mov');
+
+    // Offload thumbnail generation to the background isolate for images only
+    String thumbnailBase64 = "";
+    if (!isVideo) {
+      thumbnailBase64 = await compute(
+        _generateThumbnailIsolate,
+        file.path,
+      );
+    }
 
     final int chunkSize = 512 * 1024;
     final int fileLength = await file.length();
@@ -1234,19 +1247,31 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
     await raf.close();
 
-    final jpegNode = VfsJpeg(
-      metadata: {
-        'n': file.uri.pathSegments.last,
-        'tb': thumbnailBase64,
-        'k': base64Encode(assetKey),
-      },
-      pointers: chunkPointers,
-    );
+    VfsNode mediaNode;
+    if (isVideo) {
+      mediaNode = VfsVideo(
+        metadata: {
+          'n': file.uri.pathSegments.last,
+          'tb': thumbnailBase64,
+          'k': base64Encode(assetKey),
+        },
+        pointers: chunkPointers,
+      );
+    } else {
+      mediaNode = VfsJpeg(
+        metadata: {
+          'n': file.uri.pathSegments.last,
+          'tb': thumbnailBase64,
+          'k': base64Encode(assetKey),
+        },
+        pointers: chunkPointers,
+      );
+    }
 
-    final jpegPointer = const Uuid().v4().replaceAll('-', '');
-    final encryptedJpegNode = await compute(_serializeAndEncryptIsolate, {
+    final mediaPointer = const Uuid().v4().replaceAll('-', '');
+    final encryptedMediaNode = await compute(_serializeAndEncryptIsolate, {
       'mek': widget.mek,
-      'jsonNode': jpegNode.toJson(),
+      'jsonNode': mediaNode.toJson(),
     });
 
     await http.post(
@@ -1256,8 +1281,8 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         "device_id": deviceId,
         "lat": loc['lat'],
         "lon": loc['lon'],
-        "pointer": jpegPointer,
-        "base64_blob": base64Encode(encryptedJpegNode),
+        "pointer": mediaPointer,
+        "base64_blob": base64Encode(encryptedMediaNode),
       }),
     );
 
@@ -1278,7 +1303,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         'payload': parentFetchRes.bodyBytes,
       });
       if (parentNode is VfsDirectory) {
-        parentNode.pointers.add(jpegPointer);
+        parentNode.pointers.add(mediaPointer);
         final updatedParentBlob = await compute(_serializeAndEncryptIsolate, {
           'mek': widget.mek,
           'jsonNode': parentNode.toJson(),
@@ -1433,11 +1458,11 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: _pickAndUploadImage,
+          onPressed: _pickAndUploadMedia,
           backgroundColor: Colors.redAccent,
-          icon: const Icon(Icons.add_photo_alternate, color: Colors.black),
+          icon: const Icon(Icons.add, color: Colors.black),
           label: const Text(
-            "Upload Image",
+            "Upload Media",
             style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
           ),
         ),
@@ -1565,6 +1590,30 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                         ),
                       ],
                     );
+                  } else if (item is VfsVideo) {
+                    contentWidget = Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.movie,
+                          size: 48,
+                          color: Colors.deepPurpleAccent,
+                        ),
+                        const SizedBox(height: 8),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                          child: Text(
+                            item.name,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ],
+                    );
                   } else {
                     contentWidget = const Center(
                       child: Text(
@@ -1589,6 +1638,13 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                             builder: (context) => ImageViewerScreen(item: item),
                           ),
                         );
+                      } else if (item is VfsVideo) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Video playback coming in next phase!'),
+                            backgroundColor: Colors.blueAccent,
+                          ),
+                        );
                       }
                     },
                     onLongPress: () {
@@ -1598,7 +1654,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                         builder: (BuildContext ctx) {
                           final itemName = (item is VfsDirectory)
                               ? item.name
-                              : (item is VfsJpeg ? item.name : 'this item');
+                              : (item is VfsJpeg ? item.name : (item is VfsVideo ? item.name : 'this item'));
                           return AlertDialog(
                             backgroundColor: Colors.grey[900],
                             title: const Text(
