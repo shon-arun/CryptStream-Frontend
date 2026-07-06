@@ -962,6 +962,68 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
+  // NEW: Two-phase deletion workflow and garbage collection
+  Future<void> _deleteNode(VfsNode nodeToDelete) async {
+    setState(() { _isLoading = true; _loadingText = "Deleting & Syncing Vault..."; });
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      // PHASE 1: Structural Unlink
+      // Read the current parent folder to remove the reference
+      final parentFetchRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/fetch'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'], "pointer": _currentPointer}),
+      );
+
+      if (parentFetchRes.statusCode == 200) {
+        final parentNode = await compute(_decryptAndParseIsolate, { 'mek': widget.mek, 'payload': parentFetchRes.bodyBytes });
+        
+        if (parentNode is VfsDirectory) {
+          // Drop the target node's pointer from the parent's internal array
+          parentNode.pointers.remove(nodeToDelete.nodeId);
+          
+          // Re-encrypt and overwrite the updated directory node on the server
+          final updatedParentBlob = await compute(_serializeAndEncryptIsolate, { 'mek': widget.mek, 'jsonNode': parentNode.toJson() });
+          final updateRes = await http.post(
+            Uri.parse('https://192.168.1.2/payload/upload'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+              "pointer": _currentPointer, "base64_blob": base64Encode(updatedParentBlob)
+            }),
+          );
+          if (updateRes.statusCode != 200) throw Exception("Failed to structurally unlink the node from parent.");
+        }
+      }
+
+      // PHASE 2: Physical Purge (Garbage Collection)
+      // Assemble complete target list: Metadata node pointer + all internal raw chunk pointers
+      List<String> pointersToPurge = [nodeToDelete.nodeId];
+      pointersToPurge.addAll(nodeToDelete.pointers);
+
+      // Pass array to backend delete route
+      final deleteRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/delete'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId, "lat": loc['lat'], "lon": loc['lon'],
+          "pointers": pointersToPurge
+        }),
+      );
+
+      if (deleteRes.statusCode != 200) throw Exception("Backend failed to purge encrypted blocks.");
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deletion & Purge Complete!'), backgroundColor: Colors.green));
+      _fetchDirectory();
+      
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e'), backgroundColor: Colors.red));
+      setState(() { _isLoading = false; });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -1076,6 +1138,33 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                     builder: (context) => ImageViewerScreen(item: item)
                   ));
                 }
+              },
+              onLongPress: () {
+                // UI: Long-press alert dialog to trigger clean-up safely
+                showDialog(
+                  context: context,
+                  builder: (BuildContext ctx) {
+                    final itemName = (item is VfsDirectory) ? item.name : (item is VfsJpeg ? item.name : 'this item');
+                    return AlertDialog(
+                      backgroundColor: Colors.grey[900],
+                      title: const Text("Delete Item?", style: TextStyle(color: Colors.white)),
+                      content: Text("Are you sure you want to permanently delete '$itemName' and physically purge all of its encrypted blocks from the backend?", style: const TextStyle(color: Colors.white70)),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          child: const Text("Cancel", style: TextStyle(color: Colors.white54)),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            Navigator.of(ctx).pop();
+                            _deleteNode(item);
+                          },
+                          child: const Text("Delete & Purge", style: TextStyle(color: Colors.redAccent)),
+                        ),
+                      ],
+                    );
+                  },
+                );
               },
               child: Card(color: Colors.grey[850], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), child: contentWidget),
             );
