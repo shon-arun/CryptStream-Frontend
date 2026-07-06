@@ -14,6 +14,7 @@ import 'dart:io';
 import 'dart:math';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
+import 'package:video_player/video_player.dart';
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -43,12 +44,10 @@ class LocationService {
   static Future<void> startStream() async {
     if (_positionStreamSubscription != null) return;
 
-    // Force an initial high-accuracy lock to guarantee a baseline coordinate
     currentPosition = await Geolocator.getCurrentPosition(
       desiredAccuracy: LocationAccuracy.high,
     );
 
-    // Keep the hardware "warm" and actively listening for changes > 5 meters
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 5,
@@ -234,7 +233,6 @@ class _BiometricGateState extends State<BiometricGate> {
       () => _statusMessage = "Acquiring Enclave Coordinates (Stream)...",
     );
 
-    // Connects to the hardware and binds the background coordinate stream
     await LocationService.startStream();
     if (LocationService.currentPosition == null) {
       throw Exception("Failed to acquire initial coordinate lock.");
@@ -246,8 +244,6 @@ class _BiometricGateState extends State<BiometricGate> {
     try {
       await DeviceIdentity.generateAndStoreKeys();
     } catch (e) {
-      // Re-throw with a clear prefix so the State Machine catches it
-      // and triggers the visual Hard Lockout UI instead of failing silently.
       throw Exception("Identity Generation Failed: $e");
     }
   }
@@ -390,7 +386,6 @@ class _PassphraseGateState extends State<PassphraseGate> {
   @override
   void initState() {
     super.initState();
-    // Start background geofence heartbeat ONLY once securely inside the app
     LocationHeartbeat.start();
 
     LocationHeartbeat.onForbidden = () {
@@ -420,7 +415,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
   @override
   void dispose() {
     _controller.dispose();
-    LocationHeartbeat.stop(); // Stop heartbeat if gateway destroyed
+    LocationHeartbeat.stop(); 
     super.dispose();
   }
 
@@ -615,6 +610,9 @@ class VfsVideo extends VfsNode {
   String get name => metadata['n'] ?? 'Unnamed Video';
   String get thumbnailBase64 => metadata['tb'] ?? '';
   String get assetKey => metadata['k'] ?? '';
+  
+  // Videos strictly enforce a file size property for the loopback server's Range requests
+  int get size => metadata['s'] ?? (pointers.length * 512 * 1024); // Fallback assumption for old dummy videos
 }
 
 // -------------------------------------------------------------
@@ -634,7 +632,6 @@ Future<Uint8List> signChallenge(
   return Uint8List.fromList(signature.bytes);
 }
 
-// Instantly returns the cached coordinate from the Stream Listener (Zero Latency)
 Future<Map<String, double>> getCurrentLocation() async {
   if (LocationService.currentPosition == null) {
     LocationService.currentPosition = await Geolocator.getCurrentPosition(
@@ -775,6 +772,49 @@ Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
   return builder.toBytes();
 }
 
+/// A specialized isolate function specifically for the LocalVideoProxy to fetch single blocks on-demand
+Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(Map<String, dynamic> args) async {
+  HttpOverrides.global = DevHttpOverrides(); // Needed since isolate runs independently
+
+  final String ptr = args['pointer'];
+  final Uint8List assetKey = args['assetKey'];
+  final String deviceId = args['deviceId'];
+  final double lat = args['lat'];
+  final double lon = args['lon'];
+
+  final response = await http.post(
+    Uri.parse('https://192.168.1.2/payload/fetch'),
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "device_id": deviceId,
+      "lat": lat,
+      "lon": lon,
+      "pointer": ptr,
+    }),
+  );
+
+  if (response.statusCode != 200) throw Exception("Failed to fetch chunk: $ptr");
+
+  final payload = response.bodyBytes;
+  final nonceBytes = payload.sublist(0, 12);
+  final cipherTextBytes = payload.sublist(12, payload.length - 16);
+  final macBytes = payload.sublist(payload.length - 16);
+
+  final chachaCipher = Chacha20.poly1305Aead();
+  final secretBox = SecretBox(
+    cipherTextBytes,
+    nonce: nonceBytes,
+    mac: Mac(macBytes),
+  );
+  
+  final decryptedBytes = await chachaCipher.decrypt(
+    secretBox,
+    secretKey: SecretKey(assetKey),
+  );
+
+  return Uint8List.fromList(decryptedBytes);
+}
+
 Future<Uint8List> _downloadAndDecryptChunksIsolate(
   Map<String, dynamic> args,
 ) async {
@@ -825,23 +865,125 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(
   return builder.toBytes();
 }
 
-/// NEW ISOLATE: Decodes a full image from disk, downscales it to ~150px, compresses it, and encodes to Base64
 Future<String> _generateThumbnailIsolate(String filePath) async {
-  // Read raw bytes from disk
   final fileBytes = await File(filePath).readAsBytes();
-
-  // Decode the image (this is memory/CPU intensive, which is why it's in an isolate)
   final img.Image? decodedImage = img.decodeImage(fileBytes);
-  if (decodedImage == null) return ""; // Fallback for unsupported formats
+  if (decodedImage == null) return ""; 
 
-  // Downscale to a max width of 150 pixels, automatically scaling height to maintain aspect ratio
   final img.Image resized = img.copyResize(decodedImage, width: 150);
-
-  // Compress to JPEG with a quality of 60 (usually hits the 5-20kb sweet spot for thumbnails)
   final List<int> compressedJpg = img.encodeJpg(resized, quality: 60);
 
-  // Convert to Base64 string for embedding into the VFS JSON Node
   return base64Encode(compressedJpg);
+}
+
+// -------------------------------------------------------------
+// LOCAL LOOPBACK PROXY (Phase 2 Video Streaming)
+// -------------------------------------------------------------
+class LocalVideoProxy {
+  HttpServer? _server;
+  final VfsVideo videoNode;
+  final Uint8List assetKey;
+  final String deviceId;
+  final double lat;
+  final double lon;
+
+  static const int chunkSize = 512 * 1024; // 512KB matches backend ingest
+
+  LocalVideoProxy({
+    required this.videoNode,
+    required this.assetKey,
+    required this.deviceId,
+    required this.lat,
+    required this.lon,
+  });
+
+  Future<String> start() async {
+    // Bind to a random ephemeral port on localhost
+    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    _server!.listen(_handleRequest);
+    return 'http://127.0.0.1:${_server!.port}/stream';
+  }
+
+  void stop() {
+    _server?.close(force: true);
+  }
+
+  void _handleRequest(HttpRequest request) async {
+    final response = request.response;
+    final int videoSize = videoNode.size;
+    
+    try {
+      String? rangeHeader = request.headers.value('range');
+      int start = 0;
+      int end = videoSize - 1;
+      bool isPartial = false;
+
+      // Parse the OS media player's HTTP Range header to know what exact bytes it wants
+      if (rangeHeader != null && rangeHeader.startsWith('bytes=')) {
+        isPartial = true;
+        final parts = rangeHeader.substring(6).split('-');
+        if (parts[0].isNotEmpty) start = int.parse(parts[0]);
+        if (parts.length > 1 && parts[1].isNotEmpty) {
+          end = int.parse(parts[1]);
+        }
+      }
+
+      if (end >= videoSize) end = videoSize - 1;
+
+      // Feed specific Video HTTP Headers back to trick the native OS Player
+      response.headers.add('Accept-Ranges', 'bytes');
+      response.headers.contentType = ContentType('video', 'mp4');
+
+      if (isPartial) {
+        response.statusCode = HttpStatus.partialContent;
+        response.headers.add('Content-Range', 'bytes $start-$end/$videoSize');
+        response.headers.add('Content-Length', (end - start + 1).toString());
+      } else {
+        response.statusCode = HttpStatus.ok;
+        response.headers.add('Content-Length', videoSize.toString());
+      }
+
+      // Mathematical mapping of byte ranges -> Cryptographic Chunks
+      int currentByte = start;
+      
+      while (currentByte <= end) {
+        int chunkIndex = currentByte ~/ chunkSize;
+        
+        // Prevent array out-of-bounds if file sizes don't perfectly match math padding
+        if (chunkIndex >= videoNode.pointers.length) break; 
+        
+        String pointer = videoNode.pointers[chunkIndex];
+
+        // Decrypt only the specific 512KB chunk containing our requested bytes via Isolate
+        Uint8List decrypted = await compute(_fetchAndDecryptSingleChunkIsolate, {
+          'pointer': pointer,
+          'assetKey': assetKey,
+          'deviceId': deviceId,
+          'lat': lat,
+          'lon': lon,
+        });
+
+        int chunkStartPos = chunkIndex * chunkSize;
+        int sliceStart = currentByte - chunkStartPos;
+        int sliceEnd = sliceStart + (end - currentByte + 1);
+        if (sliceEnd > decrypted.length) sliceEnd = decrypted.length;
+
+        // Pipe the exact plaintext byte sequence seamlessly into the HTTP stream
+        response.add(decrypted.sublist(sliceStart, sliceEnd));
+
+        currentByte += (sliceEnd - sliceStart);
+      }
+      
+      await response.close();
+      
+    } catch (e) {
+      // The video player will forcefully abort requests as the user scrubs the timeline.
+      // We gracefully swallow the socket exceptions.
+      try {
+        await response.close();
+      } catch (_) {}
+    }
+  }
 }
 
 // -------------------------------------------------------------
@@ -1157,7 +1299,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
 
   Future<void> _pickAndUploadMedia() async {
     final picker = ImagePicker();
-    // Allow selection of both images and videos
     final XFile? pickedFile = await picker.pickMedia();
 
     if (pickedFile == null) return;
@@ -1202,7 +1343,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
 
     final bool isVideo = file.path.toLowerCase().endsWith('.mp4') || file.path.toLowerCase().endsWith('.mov');
 
-    // Offload thumbnail generation to the background isolate for images only
     String thumbnailBase64 = "";
     if (!isVideo) {
       thumbnailBase64 = await compute(
@@ -1254,6 +1394,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           'n': file.uri.pathSegments.last,
           'tb': thumbnailBase64,
           'k': base64Encode(assetKey),
+          's': fileLength, // Store the exact size in bytes specifically for Video Range proxy mapping
         },
         pointers: chunkPointers,
       );
@@ -1324,7 +1465,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
-  // NEW: Two-phase deletion workflow and garbage collection
   Future<void> _deleteNode(VfsNode nodeToDelete) async {
     setState(() {
       _isLoading = true;
@@ -1334,8 +1474,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       String deviceId = await DeviceIdentity.getDeviceId();
       final loc = await getCurrentLocation();
 
-      // PHASE 1: Structural Unlink
-      // Read the current parent folder to remove the reference
       final parentFetchRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/fetch'),
         headers: {"Content-Type": "application/json"},
@@ -1354,10 +1492,8 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         });
 
         if (parentNode is VfsDirectory) {
-          // Drop the target node's pointer from the parent's internal array
           parentNode.pointers.remove(nodeToDelete.nodeId);
 
-          // Re-encrypt and overwrite the updated directory node on the server
           final updatedParentBlob = await compute(_serializeAndEncryptIsolate, {
             'mek': widget.mek,
             'jsonNode': parentNode.toJson(),
@@ -1380,12 +1516,9 @@ class _GalleryGridViewState extends State<GalleryGridView> {
         }
       }
 
-      // PHASE 2: Physical Purge (Garbage Collection)
-      // Assemble complete target list: Metadata node pointer + all internal raw chunk pointers
       List<String> pointersToPurge = [nodeToDelete.nodeId];
       pointersToPurge.addAll(nodeToDelete.pointers);
 
-      // Pass array to backend delete route
       final deleteRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/delete'),
         headers: {"Content-Type": "application/json"},
@@ -1433,7 +1566,6 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       child: Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
-          // title: Text(_currentPointer == "root" ? "Encrypted Gallery" : "Folder View", style: const TextStyle(color: Colors.redAccent)),
           title: Text(
             _currentFolderName,
             style: const TextStyle(color: Colors.redAccent),
@@ -1639,16 +1771,16 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                           ),
                         );
                       } else if (item is VfsVideo) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Video playback coming in next phase!'),
-                            backgroundColor: Colors.blueAccent,
+                        // Launch the new Loopback Video Player
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => VideoViewerScreen(item: item),
                           ),
                         );
                       }
                     },
                     onLongPress: () {
-                      // UI: Long-press alert dialog to trigger clean-up safely
                       showDialog(
                         context: context,
                         builder: (BuildContext ctx) {
@@ -1784,6 +1916,158 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
               )
             : Image.memory(_highResBytes!, fit: BoxFit.contain),
       ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// VIDEO VIEWER SCREEN (Local Loopback Streaming)
+// -------------------------------------------------------------
+
+class VideoViewerScreen extends StatefulWidget {
+  final VfsVideo item;
+  const VideoViewerScreen({super.key, required this.item});
+
+  @override
+  State<VideoViewerScreen> createState() => _VideoViewerScreenState();
+}
+
+class _VideoViewerScreenState extends State<VideoViewerScreen> {
+  VideoPlayerController? _controller;
+  LocalVideoProxy? _proxy;
+  bool _isInitialized = false;
+  String _error = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _startProxyAndPlayer();
+  }
+
+  Future<void> _startProxyAndPlayer() async {
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+      final Uint8List assetKey = base64Decode(widget.item.assetKey);
+
+      _proxy = LocalVideoProxy(
+        videoNode: widget.item,
+        assetKey: assetKey,
+        deviceId: deviceId,
+        lat: loc['lat']!,
+        lon: loc['lon']!,
+      );
+
+      // Start the local interceptor server
+      String proxyUrl = await _proxy!.start();
+
+      // Point the native OS Video Player directly at our Dart proxy server loopback address
+      _controller = VideoPlayerController.networkUrl(Uri.parse(proxyUrl))
+        ..initialize().then((_) {
+          if (mounted) {
+            setState(() {
+              _isInitialized = true;
+            });
+            _controller!.play();
+          }
+        });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    _proxy?.stop(); // Safely kill the loopback server when the user leaves the screen
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text(
+          widget.item.name,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+        ),
+        backgroundColor: Colors.black,
+        elevation: 0,
+      ),
+      body: Center(
+        child: _error.isNotEmpty
+            ? Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text(
+                  'Proxy Error: $_error',
+                  style: const TextStyle(color: Colors.redAccent),
+                ),
+              )
+            : _isInitialized
+            ? AspectRatio(
+                aspectRatio: _controller!.value.aspectRatio,
+                child: Stack(
+                  alignment: Alignment.bottomCenter,
+                  children: [
+                    VideoPlayer(_controller!),
+                    _ControlsOverlay(controller: _controller!),
+                    VideoProgressIndicator(_controller!, allowScrubbing: true),
+                  ],
+                ),
+              )
+            : const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(color: Colors.deepPurpleAccent),
+                  SizedBox(height: 16),
+                  Text(
+                    "Spinning up Loopback Proxy...",
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+// Simple Play/Pause Overlay UI for the Video
+class _ControlsOverlay extends StatelessWidget {
+  const _ControlsOverlay({required this.controller});
+  final VideoPlayerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: <Widget>[
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 50),
+          reverseDuration: const Duration(milliseconds: 200),
+          child: controller.value.isPlaying
+              ? const SizedBox.shrink()
+              : const ColoredBox(
+                  color: Colors.black26,
+                  child: Center(
+                    child: Icon(
+                      Icons.play_arrow,
+                      color: Colors.white,
+                      size: 100.0,
+                      semanticLabel: 'Play',
+                    ),
+                  ),
+                ),
+        ),
+        GestureDetector(
+          onTap: () {
+            controller.value.isPlaying ? controller.pause() : controller.play();
+          },
+        ),
+      ],
     );
   }
 }
