@@ -901,7 +901,8 @@ class LocalVideoProxy {
     // Bind to a random ephemeral port on localhost
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     _server!.listen(_handleRequest);
-    return 'http://127.0.0.1:${_server!.port}/stream';
+    // Explicitly append the specific file pointer as a query parameter as requested
+    return 'http://127.0.0.1:${_server!.port}/stream?ptr=${videoNode.nodeId}';
   }
 
   void stop() {
