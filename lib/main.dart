@@ -417,7 +417,7 @@ class _PassphraseGateState extends State<PassphraseGate> {
   @override
   void dispose() {
     _controller.dispose();
-    LocationHeartbeat.stop(); 
+    LocationHeartbeat.stop();
     super.dispose();
   }
 
@@ -612,9 +612,13 @@ class VfsVideo extends VfsNode {
   String get name => metadata['n'] ?? 'Unnamed Video';
   String get thumbnailBase64 => metadata['tb'] ?? '';
   String get assetKey => metadata['k'] ?? '';
-  
+
   // Videos strictly enforce a file size property for the loopback server's Range requests
-  int get size => metadata['s'] ?? (pointers.length * 512 * 1024); // Fallback assumption for old dummy videos
+  int get size =>
+      metadata['s'] ??
+      (pointers.length *
+          512 *
+          1024); // Fallback assumption for old dummy videos
 }
 
 // -------------------------------------------------------------
@@ -673,10 +677,9 @@ Future<Uint8List> bootstrapSession(String passphrase) async {
       "lon": loc['lon'],
     }),
   );
-  if (challengeRes.statusCode != 200){
+  if (challengeRes.statusCode != 200) {
     throw Exception("Challenge request failed");
   }
-
 
   String challenge = jsonDecode(challengeRes.body)['challenge'];
   String? privKeyBase64 = await DeviceIdentity.getPrivateKey();
@@ -777,8 +780,11 @@ Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
 }
 
 /// A specialized isolate function specifically for the LocalVideoProxy to fetch single blocks on-demand
-Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(Map<String, dynamic> args) async {
-  HttpOverrides.global = DevHttpOverrides(); // Needed since isolate runs independently
+Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(
+  Map<String, dynamic> args,
+) async {
+  HttpOverrides.global =
+      DevHttpOverrides(); // Needed since isolate runs independently
 
   final String ptr = args['pointer'];
   final Uint8List assetKey = args['assetKey'];
@@ -812,7 +818,7 @@ Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(Map<String, dynamic> args) 
     nonce: nonceBytes,
     mac: Mac(macBytes),
   );
-  
+
   final decryptedBytes = await chachaCipher.decrypt(
     secretBox,
     secretKey: SecretKey(assetKey),
@@ -847,7 +853,7 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(
       }),
     );
 
-    if (response.statusCode != 200){
+    if (response.statusCode != 200) {
       throw Exception("Failed to fetch chunk: $ptr");
     }
 
@@ -875,7 +881,7 @@ Future<Uint8List> _downloadAndDecryptChunksIsolate(
 Future<String> _generateThumbnailIsolate(String filePath) async {
   final fileBytes = await File(filePath).readAsBytes();
   final img.Image? decodedImage = img.decodeImage(fileBytes);
-  if (decodedImage == null) return ""; 
+  if (decodedImage == null) return "";
 
   final img.Image resized = img.copyResize(decodedImage, width: 150);
   final List<int> compressedJpg = img.encodeJpg(resized, quality: 60);
@@ -919,7 +925,7 @@ class LocalVideoProxy {
   void _handleRequest(HttpRequest request) async {
     final response = request.response;
     final int videoSize = videoNode.size;
-    
+
     try {
       String? rangeHeader = request.headers.value('range');
       int start = 0;
@@ -953,23 +959,24 @@ class LocalVideoProxy {
 
       // Mathematical mapping of byte ranges -> Cryptographic Chunks
       int currentByte = start;
-      
+
       while (currentByte <= end) {
         int chunkIndex = currentByte ~/ chunkSize;
-        
+
         // Prevent array out-of-bounds if file sizes don't perfectly match math padding
-        if (chunkIndex >= videoNode.pointers.length) break; 
-        
+        if (chunkIndex >= videoNode.pointers.length) break;
+
         String pointer = videoNode.pointers[chunkIndex];
 
         // Decrypt only the specific 512KB chunk containing our requested bytes via Isolate
-        Uint8List decrypted = await compute(_fetchAndDecryptSingleChunkIsolate, {
-          'pointer': pointer,
-          'assetKey': assetKey,
-          'deviceId': deviceId,
-          'lat': lat,
-          'lon': lon,
-        });
+        Uint8List decrypted =
+            await compute(_fetchAndDecryptSingleChunkIsolate, {
+              'pointer': pointer,
+              'assetKey': assetKey,
+              'deviceId': deviceId,
+              'lat': lat,
+              'lon': lon,
+            });
 
         int chunkStartPos = chunkIndex * chunkSize;
         int sliceStart = currentByte - chunkStartPos;
@@ -981,9 +988,8 @@ class LocalVideoProxy {
 
         currentByte += (sliceEnd - sliceStart);
       }
-      
+
       await response.close();
-      
     } catch (e) {
       // The video player will forcefully abort requests as the user scrubs the timeline.
       // We gracefully swallow the socket exceptions.
@@ -1354,14 +1360,13 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       List.generate(32, (_) => random.nextInt(256)),
     );
 
-    final bool isVideo = file.path.toLowerCase().endsWith('.mp4') || file.path.toLowerCase().endsWith('.mov');
+    final bool isVideo =
+        file.path.toLowerCase().endsWith('.mp4') ||
+        file.path.toLowerCase().endsWith('.mov');
 
     String thumbnailBase64 = "";
     if (!isVideo) {
-      thumbnailBase64 = await compute(
-        _generateThumbnailIsolate,
-        file.path,
-      );
+      thumbnailBase64 = await compute(_generateThumbnailIsolate, file.path);
     }
 
     final int chunkSize = 512 * 1024;
@@ -1408,7 +1413,8 @@ class _GalleryGridViewState extends State<GalleryGridView> {
           'n': file.uri.pathSegments.last,
           'tb': thumbnailBase64,
           'k': base64Encode(assetKey),
-          's': fileLength, // Store the exact size in bytes specifically for Video Range proxy mapping
+          's':
+              fileLength, // Store the exact size in bytes specifically for Video Range proxy mapping
         },
         pointers: chunkPointers,
       );
@@ -1482,11 +1488,44 @@ class _GalleryGridViewState extends State<GalleryGridView> {
   Future<void> _deleteNode(VfsNode nodeToDelete) async {
     setState(() {
       _isLoading = true;
-      _loadingText = "Deleting & Syncing Vault...";
+      _loadingText = "Recursively purging vault...";
     });
     try {
       String deviceId = await DeviceIdentity.getDeviceId();
       final loc = await getCurrentLocation();
+
+      List<String> pointersToPurge = [];
+
+      Future<void> _collectGarbage(VfsNode node) async {
+        pointersToPurge.add(node.nodeId);
+
+        if (node is VfsJpeg) {
+          pointersToPurge.addAll(node.pointers); // Add all 512KB chunks
+        } else if (node is VfsDirectory) {
+          for (String ptr in node.pointers) {
+            final res = await http.post(
+              Uri.parse('https://192.168.1.2/payload/fetch'),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode({
+                "device_id": deviceId,
+                "lat": loc['lat'],
+                "lon": loc['lon'],
+                "pointer": ptr,
+              }),
+            );
+            if (res.statusCode == 200) {
+              final child = await compute(_decryptAndParseIsolate, {
+                'mek': widget.mek,
+                'payload': res.bodyBytes,
+              });
+              child.nodeId = ptr;
+              await _collectGarbage(child); // Recurse
+            }
+          }
+        }
+      }
+
+      await _collectGarbage(nodeToDelete);
 
       final parentFetchRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/fetch'),
@@ -1507,12 +1546,11 @@ class _GalleryGridViewState extends State<GalleryGridView> {
 
         if (parentNode is VfsDirectory) {
           parentNode.pointers.remove(nodeToDelete.nodeId);
-
           final updatedParentBlob = await compute(_serializeAndEncryptIsolate, {
             'mek': widget.mek,
             'jsonNode': parentNode.toJson(),
           });
-          final updateRes = await http.post(
+          await http.post(
             Uri.parse('https://192.168.1.2/payload/upload'),
             headers: {"Content-Type": "application/json"},
             body: jsonEncode({
@@ -1523,15 +1561,8 @@ class _GalleryGridViewState extends State<GalleryGridView> {
               "base64_blob": base64Encode(updatedParentBlob),
             }),
           );
-          if (updateRes.statusCode != 200)
-            throw Exception(
-              "Failed to structurally unlink the node from parent.",
-            );
         }
       }
-
-      List<String> pointersToPurge = [nodeToDelete.nodeId];
-      pointersToPurge.addAll(nodeToDelete.pointers);
 
       final deleteRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/delete'),
@@ -1545,24 +1576,19 @@ class _GalleryGridViewState extends State<GalleryGridView> {
       );
 
       if (deleteRes.statusCode != 200)
-        throw Exception("Backend failed to purge encrypted blocks.");
+        throw Exception("Backend failed to purge blocks.");
 
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Deletion & Purge Complete!'),
-            backgroundColor: Colors.green,
-          ),
+          const SnackBar(content: Text('Deep delete successful!')),
         );
+      }
       _fetchDirectory();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Delete failed: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
       }
       setState(() {
         _isLoading = false;
@@ -1801,7 +1827,11 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                         builder: (BuildContext ctx) {
                           final itemName = (item is VfsDirectory)
                               ? item.name
-                              : (item is VfsJpeg ? item.name : (item is VfsVideo ? item.name : 'this item'));
+                              : (item is VfsJpeg
+                                    ? item.name
+                                    : (item is VfsVideo
+                                          ? item.name
+                                          : 'this item'));
                           return AlertDialog(
                             backgroundColor: Colors.grey[900],
                             title: const Text(
@@ -1998,7 +2028,8 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
   @override
   void dispose() {
     _controller?.dispose();
-    _proxy?.stop(); // Safely kill the loopback server when the user leaves the screen
+    _proxy
+        ?.stop(); // Safely kill the loopback server when the user leaves the screen
     super.dispose();
   }
 
