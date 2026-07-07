@@ -566,6 +566,9 @@ abstract class VfsNode {
   final List<String> pointers; // 'p'
   String nodeId = ""; // Transient property for VFS navigation
 
+  // Dynamically resolve the name via the metadata map for all child types
+  String get name => metadata['n'] ?? 'Unknown Item';
+
   VfsNode({required this.type, required this.metadata, required this.pointers});
 
   factory VfsNode.fromJson(Map<String, dynamic> json) {
@@ -595,12 +598,16 @@ class VfsGeneric extends VfsNode {
 class VfsDirectory extends VfsNode {
   VfsDirectory({required super.metadata, required super.pointers})
     : super(type: 'd');
+
+  @override
   String get name => metadata['n'] ?? 'Unnamed Directory';
 }
 
 class VfsJpeg extends VfsNode {
   VfsJpeg({required super.metadata, required super.pointers})
     : super(type: 'j');
+
+  @override
   String get name => metadata['n'] ?? 'Unnamed Image';
   String get thumbnailBase64 => metadata['tb'] ?? '';
   String get assetKey => metadata['k'] ?? '';
@@ -609,6 +616,8 @@ class VfsJpeg extends VfsNode {
 class VfsVideo extends VfsNode {
   VfsVideo({required super.metadata, required super.pointers})
     : super(type: 'v');
+
+  @override
   String get name => metadata['n'] ?? 'Unnamed Video';
   String get thumbnailBase64 => metadata['tb'] ?? '';
   String get assetKey => metadata['k'] ?? '';
@@ -1011,7 +1020,8 @@ class GalleryGridView extends StatefulWidget {
   State<GalleryGridView> createState() => _GalleryGridViewState();
 }
 
-class _GalleryGridViewState extends State<GalleryGridView> {
+class _GalleryGridViewState extends State<GalleryGridView>
+    with WidgetsBindingObserver {
   bool _isLoading = true;
   String _loadingText = "Fetching & Decrypting Gallery...";
   List<VfsNode> _items = [];
@@ -1021,10 +1031,64 @@ class _GalleryGridViewState extends State<GalleryGridView> {
   String _currentPointer = "root";
   String _currentFolderName = "Encrypted Gallery";
 
+  // Background Biometric Shield State
+  bool _isLocked = false;
+  bool _isAuthenticating = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fetchDirectory();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Prevent infinite looping caused by the OS native biometric dialog itself
+    // triggering inactive/resumed lifecycle events.
+    if (_isAuthenticating) return;
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      setState(() {
+        _isLocked = true;
+      });
+    } else if (state == AppLifecycleState.resumed) {
+      if (_isLocked) {
+        _promptBiometricUnlock();
+      }
+    }
+  }
+
+  Future<void> _promptBiometricUnlock() async {
+    if (_isAuthenticating) return;
+    _isAuthenticating = true;
+    bool authenticated = false;
+    try {
+      final LocalAuthentication auth = LocalAuthentication();
+      authenticated = await auth.authenticate(
+        localizedReason: 'Unlock CryptStream Vault',
+        options: const AuthenticationOptions(
+          stickyAuth: true,
+          biometricOnly: true,
+        ),
+      );
+    } catch (e) {
+      // Gracefully swallow errors and stay on the lock screen
+    } finally {
+      _isAuthenticating = false;
+      if (authenticated && mounted) {
+        setState(() {
+          _isLocked = false;
+        });
+      }
+    }
   }
 
   Future<void> _fetchDirectory() async {
@@ -1596,8 +1660,247 @@ class _GalleryGridViewState extends State<GalleryGridView> {
     }
   }
 
+  Future<void> _renameNode(VfsNode node, String newName) async {
+    setState(() {
+      _isLoading = true;
+      _loadingText = "Renaming item...";
+    });
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      // 1. Update the target VfsNode's in-memory metadata dictionary
+      node.metadata['n'] = newName;
+
+      // 2. Re-encrypt the updated node metadata
+      final updatedBlob = await compute(_serializeAndEncryptIsolate, {
+        'mek': widget.mek,
+        'jsonNode': node.toJson(),
+      });
+
+      // 3. Overwrite the existing pointer on the server (underlying chunks remain untouched)
+      final updateRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointer": node.nodeId,
+          "base64_blob": base64Encode(updatedBlob),
+        }),
+      );
+
+      if (updateRes.statusCode != 200) {
+        throw Exception("Failed to overwrite metadata on server.");
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Item renamed successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      _fetchDirectory();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Rename failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _showItemOptions(VfsNode item) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.edit, color: Colors.white),
+                title: const Text(
+                  'Rename',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showRenameDialog(item);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete, color: Colors.redAccent),
+                title: const Text(
+                  'Delete & Purge',
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showDeleteDialog(item);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showRenameDialog(VfsNode item) async {
+    TextEditingController nameController = TextEditingController(
+      text: item.name,
+    );
+    return showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text(
+            "Rename Item",
+            style: TextStyle(color: Colors.white),
+          ),
+          content: TextField(
+            controller: nameController,
+            autofocus: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              hintText: "Enter new name",
+              hintStyle: TextStyle(color: Colors.white54),
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.white24),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.blueAccent),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              child: const Text(
+                "Cancel",
+                style: TextStyle(color: Colors.white54),
+              ),
+              onPressed: () => Navigator.pop(context),
+            ),
+            TextButton(
+              child: const Text(
+                "Save",
+                style: TextStyle(color: Colors.blueAccent),
+              ),
+              onPressed: () {
+                if (nameController.text.trim().isNotEmpty &&
+                    nameController.text.trim() != item.name) {
+                  Navigator.pop(context);
+                  _renameNode(item, nameController.text.trim());
+                } else {
+                  Navigator.pop(context);
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showDeleteDialog(VfsNode item) {
+    showDialog(
+      context: context,
+      builder: (BuildContext ctx) {
+        final itemName = item.name;
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text(
+            "Delete Item?",
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            "Are you sure you want to permanently delete '$itemName' and physically purge all of its encrypted blocks from the backend?",
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text(
+                "Cancel",
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _deleteNode(item);
+              },
+              child: const Text(
+                "Delete & Purge",
+                style: TextStyle(color: Colors.redAccent),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Inject the Biometric Lock Screen shield to protect the OS App Switcher Snapshot
+    if (_isLocked) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock_outline, size: 80, color: Colors.redAccent),
+              const SizedBox(height: 24),
+              const Text(
+                "Vault Locked",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "Biometric verification required to resume.",
+                style: TextStyle(color: Colors.white54, fontSize: 16),
+              ),
+              const SizedBox(height: 36),
+              ElevatedButton.icon(
+                onPressed: _promptBiometricUnlock,
+                icon: const Icon(Icons.fingerprint),
+                label: const Text("Unlock Vault"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return PopScope(
       canPop: _navigationStack.isEmpty,
       onPopInvoked: (didPop) {
@@ -1692,9 +1995,9 @@ class _GalleryGridViewState extends State<GalleryGridView> {
             : GridView.builder(
                 padding: const EdgeInsets.all(16),
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 4,
-                  crossAxisSpacing: 4,
-                  mainAxisSpacing: 4,
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 16,
                 ),
                 itemCount: _items.length,
                 itemBuilder: (context, index) {
@@ -1821,50 +2124,7 @@ class _GalleryGridViewState extends State<GalleryGridView> {
                         );
                       }
                     },
-                    onLongPress: () {
-                      showDialog(
-                        context: context,
-                        builder: (BuildContext ctx) {
-                          final itemName = (item is VfsDirectory)
-                              ? item.name
-                              : (item is VfsJpeg
-                                    ? item.name
-                                    : (item is VfsVideo
-                                          ? item.name
-                                          : 'this item'));
-                          return AlertDialog(
-                            backgroundColor: Colors.grey[900],
-                            title: const Text(
-                              "Delete Item?",
-                              style: TextStyle(color: Colors.white),
-                            ),
-                            content: Text(
-                              "Are you sure you want to permanently delete '$itemName' and physically purge all of its encrypted blocks from the backend?",
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(ctx).pop(),
-                                child: const Text(
-                                  "Cancel",
-                                  style: TextStyle(color: Colors.white54),
-                                ),
-                              ),
-                              TextButton(
-                                onPressed: () {
-                                  Navigator.of(ctx).pop();
-                                  _deleteNode(item);
-                                },
-                                child: const Text(
-                                  "Delete & Purge",
-                                  style: TextStyle(color: Colors.redAccent),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      );
-                    },
+                    onLongPress: () => _showItemOptions(item),
                     child: Card(
                       color: Colors.grey[850],
                       shape: RoundedRectangleBorder(
