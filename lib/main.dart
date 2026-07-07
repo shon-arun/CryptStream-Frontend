@@ -1439,6 +1439,8 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
     final int chunkSize = 512 * 1024;
     final int fileLength = await file.length();
+    final int totalChunks = max(1, (fileLength / chunkSize).ceil());
+
     List<String> chunkPointers = [];
 
     String deviceId = await DeviceIdentity.getDeviceId();
@@ -1446,6 +1448,14 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
     final raf = await file.open();
     for (int i = 0; i < fileLength; i += chunkSize) {
+      int currentChunkNum = (i ~/ chunkSize) + 1;
+
+      if (mounted) {
+        setState(() {
+          _loadingText = "Uploading $currentChunkNum of $totalChunks chunks...";
+        });
+      }
+
       final chunk = await raf.read(chunkSize);
       final chunkPointer = const Uuid().v4().replaceAll('-', '');
       chunkPointers.add(chunkPointer);
@@ -1473,6 +1483,12 @@ class _GalleryGridViewState extends State<GalleryGridView>
       }
     }
     await raf.close();
+
+    if (mounted) {
+      setState(() {
+        _loadingText = "Finalizing metadata...";
+      });
+    }
 
     VfsNode mediaNode;
     if (isVideo) {
@@ -1643,13 +1659,14 @@ class _GalleryGridViewState extends State<GalleryGridView>
         }),
       );
 
-      if (deleteRes.statusCode != 200)
+      if (deleteRes.statusCode != 200) {
         throw Exception("Backend failed to purge blocks.");
+      }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Deep delete successful!')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Delete successful!')));
       }
       _fetchDirectory();
     } catch (e) {
@@ -1922,7 +1939,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
           elevation: 0,
           leading: _navigationStack.isNotEmpty
               ? IconButton(
-                  icon: const Icon(Icons.arrow_back),
+                  icon: const Icon(Icons.arrow_back, color: Colors.grey),
                   onPressed: _navigateBack,
                 )
               : null,
@@ -1930,7 +1947,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
             IconButton(
               icon: Icon(
                 _isEditMode ? Icons.check : Icons.edit,
-                color: Colors.white,
+                color: Colors.grey,
               ),
               onPressed: () {
                 setState(() {
@@ -1939,11 +1956,11 @@ class _GalleryGridViewState extends State<GalleryGridView>
               },
             ),
             IconButton(
-              icon: const Icon(Icons.create_new_folder),
+              icon: const Icon(Icons.create_new_folder, color: Colors.grey),
               onPressed: _showCreateFolderDialog,
             ),
             IconButton(
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Icons.refresh, color: Colors.grey),
               onPressed: _fetchDirectory,
             ),
           ],
@@ -2191,6 +2208,14 @@ class _GalleryGridViewState extends State<GalleryGridView>
                             builder: (context) => ImageViewerScreen(
                               items: _items,
                               initialIndex: index,
+                              onRequestRename: (node) {
+                                Navigator.pop(context);
+                                _showRenameDialog(node);
+                              },
+                              onRequestDelete: (node) {
+                                Navigator.pop(context);
+                                _showDeleteDialog(node);
+                              },
                             ),
                           ),
                         );
@@ -2222,11 +2247,15 @@ class _GalleryGridViewState extends State<GalleryGridView>
 class ImageViewerScreen extends StatefulWidget {
   final List<VfsNode> items;
   final int initialIndex;
+  final void Function(VfsNode)? onRequestRename;
+  final void Function(VfsNode)? onRequestDelete;
 
   const ImageViewerScreen({
     super.key,
     required this.items,
     required this.initialIndex,
+    this.onRequestRename,
+    this.onRequestDelete,
   });
 
   @override
@@ -2361,6 +2390,44 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
         ),
         backgroundColor: Colors.black,
         elevation: 0,
+        actions: [
+          PopupMenuButton<String>(
+            color: Colors.grey[900],
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: (value) {
+              if (value == 'rename') {
+                widget.onRequestRename?.call(item);
+              } else if (value == 'delete') {
+                widget.onRequestDelete?.call(item);
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'rename',
+                child: Row(
+                  children: [
+                    Icon(Icons.edit, color: Colors.white, size: 20),
+                    SizedBox(width: 12),
+                    Text('Rename', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'delete',
+                child: Row(
+                  children: [
+                    Icon(Icons.delete, color: Colors.redAccent, size: 20),
+                    SizedBox(width: 12),
+                    Text(
+                      'Delete & Purge',
+                      style: TextStyle(color: Colors.redAccent),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
       body: Stack(
         children: [
