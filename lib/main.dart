@@ -789,10 +789,12 @@ Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
   return builder.toBytes();
 }
 
+/// A specialized isolate function specifically for the LocalVideoProxy to fetch single blocks on-demand
 Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(
   Map<String, dynamic> args,
 ) async {
-  HttpOverrides.global = DevHttpOverrides();
+  HttpOverrides.global =
+      DevHttpOverrides(); // Needed since isolate runs independently
 
   final String ptr = args['pointer'];
   final Uint8List assetKey = args['assetKey'];
@@ -2182,19 +2184,14 @@ class _GalleryGridViewState extends State<GalleryGridView>
                           _currentPointer = item.nodeId;
                         });
                         _fetchDirectory();
-                      } else if (item is VfsJpeg) {
+                      } else if (item is VfsJpeg || item is VfsVideo) {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => ImageViewerScreen(item: item),
-                          ),
-                        );
-                      } else if (item is VfsVideo) {
-                        // Launch the new Loopback Video Player
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => VideoViewerScreen(item: item),
+                            builder: (context) => ImageViewerScreen(
+                              items: _items,
+                              initialIndex: index,
+                            ),
                           ),
                         );
                       }
@@ -2219,202 +2216,230 @@ class _GalleryGridViewState extends State<GalleryGridView>
 }
 
 // -------------------------------------------------------------
-// IMAGE VIEWER SCREEN (Read Pipeline)
+// UNIFIED MEDIA VIEWER SCREEN (Navigation + Read Pipeline)
 // -------------------------------------------------------------
 
 class ImageViewerScreen extends StatefulWidget {
-  final VfsJpeg item;
-  const ImageViewerScreen({super.key, required this.item});
+  final List<VfsNode> items;
+  final int initialIndex;
+
+  const ImageViewerScreen({
+    super.key,
+    required this.items,
+    required this.initialIndex,
+  });
 
   @override
   State<ImageViewerScreen> createState() => _ImageViewerScreenState();
 }
 
 class _ImageViewerScreenState extends State<ImageViewerScreen> {
+  late int _currentIndex;
   Uint8List? _highResBytes;
-  String _error = "";
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchAndDecryptFullImage();
-  }
-
-  Future<void> _fetchAndDecryptFullImage() async {
-    try {
-      String deviceId = await DeviceIdentity.getDeviceId();
-      final loc = await getCurrentLocation();
-      final Uint8List assetKey = base64Decode(widget.item.assetKey);
-
-      final assembledBytes = await compute(_downloadAndDecryptChunksIsolate, {
-        'pointers': widget.item.pointers,
-        'assetKey': assetKey,
-        'deviceId': deviceId,
-        'lat': loc['lat'],
-        'lon': loc['lon'],
-      });
-
-      setState(() {
-        _highResBytes = assembledBytes;
-      });
-    } catch (e) {
-      setState(() {
-        _error = e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: Text(
-          widget.item.name,
-          style: const TextStyle(color: Colors.white, fontSize: 14),
-        ),
-        backgroundColor: Colors.black,
-        elevation: 0,
-      ),
-      body: Center(
-        child: _error.isNotEmpty
-            ? Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  'Decryption Error: $_error',
-                  style: const TextStyle(color: Colors.redAccent),
-                ),
-              )
-            : _highResBytes == null
-            ? const Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(color: Colors.blueAccent),
-                  SizedBox(height: 16),
-                  Text(
-                    "Streaming Encrypted Chunks...",
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                ],
-              )
-            : Image.memory(_highResBytes!, fit: BoxFit.contain),
-      ),
-    );
-  }
-}
-
-// -------------------------------------------------------------
-// VIDEO VIEWER SCREEN (Local Loopback Streaming)
-// -------------------------------------------------------------
-
-class VideoViewerScreen extends StatefulWidget {
-  final VfsVideo item;
-  const VideoViewerScreen({super.key, required this.item});
-
-  @override
-  State<VideoViewerScreen> createState() => _VideoViewerScreenState();
-}
-
-class _VideoViewerScreenState extends State<VideoViewerScreen> {
-  VideoPlayerController? _controller;
+  VideoPlayerController? _videoController;
   LocalVideoProxy? _proxy;
-  bool _isInitialized = false;
   String _error = "";
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _startProxyAndPlayer();
+    _currentIndex = widget.initialIndex;
+    _loadCurrentMedia();
   }
 
-  Future<void> _startProxyAndPlayer() async {
+  void _cleanup() {
+    _videoController?.dispose();
+    _videoController = null;
+    _proxy?.stop();
+    _proxy = null;
+    _highResBytes = null;
+    _error = "";
+    _isLoading = true;
+  }
+
+  @override
+  void dispose() {
+    _cleanup();
+    super.dispose();
+  }
+
+  Future<void> _loadCurrentMedia() async {
+    _cleanup();
+    setState(() {});
+
     try {
+      final item = widget.items[_currentIndex];
       String deviceId = await DeviceIdentity.getDeviceId();
       final loc = await getCurrentLocation();
-      final Uint8List assetKey = base64Decode(widget.item.assetKey);
 
-      _proxy = LocalVideoProxy(
-        videoNode: widget.item,
-        assetKey: assetKey,
-        deviceId: deviceId,
-        lat: loc['lat']!,
-        lon: loc['lon']!,
-      );
+      String assetKeyB64 = "";
+      List<String> pointers = [];
+      if (item is VfsJpeg) {
+        assetKeyB64 = item.assetKey;
+        pointers = item.pointers;
+      } else if (item is VfsVideo) {
+        assetKeyB64 = item.assetKey;
+        pointers = item.pointers;
+      } else {
+        throw Exception("Unsupported media type");
+      }
 
-      // Start the local interceptor server
-      String proxyUrl = await _proxy!.start();
+      final Uint8List assetKey = base64Decode(assetKeyB64);
 
-      // Point the native OS Video Player directly at our Dart proxy server loopback address
-      _controller = VideoPlayerController.networkUrl(Uri.parse(proxyUrl))
-        ..initialize().then((_) {
-          if (mounted) {
-            setState(() {
-              _isInitialized = true;
-            });
-            _controller!.play();
-          }
+      if (item is VfsJpeg) {
+        final assembledBytes = await compute(_downloadAndDecryptChunksIsolate, {
+          'pointers': pointers,
+          'assetKey': assetKey,
+          'deviceId': deviceId,
+          'lat': loc['lat'],
+          'lon': loc['lon'],
         });
+
+        if (mounted) {
+          setState(() {
+            _highResBytes = assembledBytes;
+            _isLoading = false;
+          });
+        }
+      } else if (item is VfsVideo) {
+        _proxy = LocalVideoProxy(
+          videoNode: item,
+          assetKey: assetKey,
+          deviceId: deviceId,
+          lat: loc['lat']!,
+          lon: loc['lon']!,
+        );
+
+        String proxyUrl = await _proxy!.start();
+
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(proxyUrl))
+          ..initialize().then((_) {
+            if (mounted) {
+              setState(() {
+                _isLoading = false;
+              });
+              _videoController!.play();
+            }
+          });
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
           _error = e.toString();
+          _isLoading = false;
         });
       }
     }
   }
 
-  @override
-  void dispose() {
-    _controller?.dispose();
-    _proxy
-        ?.stop(); // Safely kill the loopback server when the user leaves the screen
-    super.dispose();
+  void _navigate(int delta) {
+    int nextIndex = _currentIndex + delta;
+    while (nextIndex >= 0 && nextIndex < widget.items.length) {
+      if (widget.items[nextIndex] is VfsJpeg ||
+          widget.items[nextIndex] is VfsVideo) {
+        setState(() {
+          _currentIndex = nextIndex;
+        });
+        _loadCurrentMedia();
+        return;
+      }
+      nextIndex += delta;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final item = widget.items[_currentIndex];
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         title: Text(
-          widget.item.name,
+          item.name,
           style: const TextStyle(color: Colors.white, fontSize: 14),
         ),
         backgroundColor: Colors.black,
         elevation: 0,
       ),
-      body: Center(
-        child: _error.isNotEmpty
-            ? Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  'Proxy Error: $_error',
-                  style: const TextStyle(color: Colors.redAccent),
+      body: Stack(
+        children: [
+          Center(
+            child: _error.isNotEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Text(
+                      'Error: $_error',
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  )
+                : _isLoading
+                ? const Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      CircularProgressIndicator(color: Colors.blueAccent),
+                      SizedBox(height: 16),
+                      Text(
+                        "Streaming Encrypted Chunks...",
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    ],
+                  )
+                : (item is VfsJpeg && _highResBytes != null)
+                ? Image.memory(_highResBytes!, fit: BoxFit.contain)
+                : (_videoController != null &&
+                      _videoController!.value.isInitialized)
+                ? AspectRatio(
+                    aspectRatio: _videoController!.value.aspectRatio,
+                    child: Stack(
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        VideoPlayer(_videoController!),
+                        _ControlsOverlay(controller: _videoController!),
+                        VideoProgressIndicator(
+                          _videoController!,
+                          allowScrubbing: true,
+                        ),
+                      ],
+                    ),
+                  )
+                : const SizedBox(),
+          ),
+
+          // Left Navigation Overlay
+          Positioned(
+            left: 10,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: IconButton(
+                icon: const Icon(
+                  Icons.chevron_left,
+                  color: Colors.white,
+                  size: 48,
                 ),
-              )
-            : _isInitialized
-            ? AspectRatio(
-                aspectRatio: _controller!.value.aspectRatio,
-                child: Stack(
-                  alignment: Alignment.bottomCenter,
-                  children: [
-                    VideoPlayer(_controller!),
-                    _ControlsOverlay(controller: _controller!),
-                    VideoProgressIndicator(_controller!, allowScrubbing: true),
-                  ],
-                ),
-              )
-            : const Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(color: Colors.deepPurpleAccent),
-                  SizedBox(height: 16),
-                  Text(
-                    "Spinning up Loopback Proxy...",
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                ],
+                onPressed: () => _navigate(-1),
               ),
+            ),
+          ),
+
+          // Right Navigation Overlay
+          Positioned(
+            right: 10,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: IconButton(
+                icon: const Icon(
+                  Icons.chevron_right,
+                  color: Colors.white,
+                  size: 48,
+                ),
+                onPressed: () => _navigate(1),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
