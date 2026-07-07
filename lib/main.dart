@@ -15,6 +15,7 @@ import 'dart:math';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 import 'package:video_player/video_player.dart';
+import 'package:reorderable_grid_view/reorderable_grid_view.dart';
 
 void main() {
   HttpOverrides.global = DevHttpOverrides();
@@ -1035,6 +1036,9 @@ class _GalleryGridViewState extends State<GalleryGridView>
   bool _isLocked = false;
   bool _isAuthenticating = false;
 
+  // Edit Mode Flag
+  bool _isEditMode = false;
+
   @override
   void initState() {
     super.initState();
@@ -1923,6 +1927,20 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 )
               : null,
           actions: [
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _isEditMode = !_isEditMode;
+                });
+              },
+              child: Text(
+                _isEditMode ? "Done" : "Edit",
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.create_new_folder),
               onPressed: _showCreateFolderDialog,
@@ -1992,7 +2010,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                   style: TextStyle(color: Colors.white54),
                 ),
               )
-            : GridView.builder(
+            : ReorderableGridView.builder(
                 padding: const EdgeInsets.all(16),
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 3,
@@ -2000,6 +2018,67 @@ class _GalleryGridViewState extends State<GalleryGridView>
                   mainAxisSpacing: 16,
                 ),
                 itemCount: _items.length,
+                onReorder: (oldIndex, newIndex) async {
+                  setState(() {
+                    if (oldIndex < newIndex) {
+                      newIndex -= 1;
+                    }
+                    final item = _items.removeAt(oldIndex);
+                    _items.insert(newIndex, item);
+                  });
+
+                  try {
+                    String deviceId = await DeviceIdentity.getDeviceId();
+                    final loc = await getCurrentLocation();
+
+                    final parentFetchRes = await http.post(
+                      Uri.parse('https://192.168.1.2/payload/fetch'),
+                      headers: {"Content-Type": "application/json"},
+                      body: jsonEncode({
+                        "device_id": deviceId,
+                        "lat": loc['lat'],
+                        "lon": loc['lon'],
+                        "pointer": _currentPointer,
+                      }),
+                    );
+
+                    if (parentFetchRes.statusCode == 200) {
+                      final parentNode = await compute(
+                        _decryptAndParseIsolate,
+                        {
+                          'mek': widget.mek,
+                          'payload': parentFetchRes.bodyBytes,
+                        },
+                      );
+
+                      if (parentNode is VfsDirectory) {
+                        parentNode.pointers.clear();
+                        parentNode.pointers.addAll(_items.map((e) => e.nodeId));
+
+                        final updatedParentBlob = await compute(
+                          _serializeAndEncryptIsolate,
+                          {'mek': widget.mek, 'jsonNode': parentNode.toJson()},
+                        );
+
+                        await http.post(
+                          Uri.parse('https://192.168.1.2/payload/upload'),
+                          headers: {"Content-Type": "application/json"},
+                          body: jsonEncode({
+                            "device_id": deviceId,
+                            "lat": loc['lat'],
+                            "lon": loc['lon'],
+                            "pointer": _currentPointer,
+                            "base64_blob": base64Encode(updatedParentBlob),
+                          }),
+                        );
+                      }
+                    }
+                  } catch (e) {
+                    debugPrint(
+                      "Failed to permanently save reordered state: $e",
+                    );
+                  }
+                },
                 itemBuilder: (context, index) {
                   final item = _items[index];
                   Widget contentWidget;
@@ -2100,6 +2179,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                   }
 
                   return InkWell(
+                    key: ValueKey(item.nodeId),
                     onTap: () {
                       if (item is VfsDirectory) {
                         setState(() {
@@ -2124,7 +2204,10 @@ class _GalleryGridViewState extends State<GalleryGridView>
                         );
                       }
                     },
-                    onLongPress: () => _showItemOptions(item),
+                    // Prevent the native context menu from opening when in edit mode, allowing drag to occur smoothly
+                    onLongPress: _isEditMode
+                        ? null
+                        : () => _showItemOptions(item),
                     child: Card(
                       color: Colors.grey[850],
                       shape: RoundedRectangleBorder(
