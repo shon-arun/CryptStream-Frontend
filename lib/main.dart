@@ -789,12 +789,10 @@ Future<Uint8List> _encryptChunkIsolate(Map<String, dynamic> args) async {
   return builder.toBytes();
 }
 
-/// A specialized isolate function specifically for the LocalVideoProxy to fetch single blocks on-demand
 Future<Uint8List> _fetchAndDecryptSingleChunkIsolate(
   Map<String, dynamic> args,
 ) async {
-  HttpOverrides.global =
-      DevHttpOverrides(); // Needed since isolate runs independently
+  HttpOverrides.global = DevHttpOverrides();
 
   final String ptr = args['pointer'];
   final Uint8List assetKey = args['assetKey'];
@@ -1927,19 +1925,16 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 )
               : null,
           actions: [
-            TextButton(
+            IconButton(
+              icon: Icon(
+                _isEditMode ? Icons.check : Icons.edit,
+                color: Colors.white,
+              ),
               onPressed: () {
                 setState(() {
                   _isEditMode = !_isEditMode;
                 });
               },
-              child: Text(
-                _isEditMode ? "Done" : "Edit",
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
             ),
             IconButton(
               icon: const Icon(Icons.create_new_folder),
