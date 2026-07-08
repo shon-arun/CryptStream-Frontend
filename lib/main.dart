@@ -1925,62 +1925,140 @@ class _GalleryGridViewState extends State<GalleryGridView>
         }),
       );
 
-      if (currentDirRes.statusCode != 200)
+      if (currentDirRes.statusCode != 200) {
         throw Exception("Failed to fetch current directory.");
+      }
 
       final currentDirNode = await compute(_decryptAndParseIsolate, {
         'mek': widget.mek,
         'payload': currentDirRes.bodyBytes,
       });
 
-      if (currentDirNode is! VfsDirectory)
+      if (currentDirNode is! VfsDirectory) {
         throw Exception("Current pointer is not a directory.");
+      }
 
       if (!_isCutAction) {
         // COPY LOGIC
-        final targetRes = await http.post(
-          Uri.parse('https://192.168.1.2/payload/fetch'),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode({
-            "device_id": deviceId,
-            "lat": loc['lat'],
-            "lon": loc['lon'],
-            "pointer": _clipboardNodeId,
-          }),
+        Future<String> _duplicateNodeDeep(
+          String sourcePointer,
+          bool isRootCopy,
+        ) async {
+          final targetRes = await http.post(
+            Uri.parse('https://192.168.1.2/payload/fetch'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId,
+              "lat": loc['lat'],
+              "lon": loc['lon'],
+              "pointer": sourcePointer,
+            }),
+          );
+          if (targetRes.statusCode != 200) {
+            throw Exception("Failed to fetch clipboard item.");
+          }
+
+          final targetNode = await compute(_decryptAndParseIsolate, {
+            'mek': widget.mek,
+            'payload': targetRes.bodyBytes,
+          });
+
+          if (isRootCopy) {
+            targetNode.metadata['n'] = "${targetNode.metadata['n']} (Copy)";
+          }
+
+          if (targetNode is VfsDirectory) {
+            List<String> duplicatedChildren = [];
+            for (String childPtr in targetNode.pointers) {
+              duplicatedChildren.add(await _duplicateNodeDeep(childPtr, false));
+            }
+            targetNode.pointers.clear();
+            targetNode.pointers.addAll(duplicatedChildren);
+          } else if (targetNode is VfsJpeg || targetNode is VfsVideo) {
+            final oldAssetKey = base64Decode((targetNode as dynamic).assetKey);
+            final random = Random.secure();
+            final newAssetKey = Uint8List.fromList(
+              List.generate(32, (_) => random.nextInt(256)),
+            );
+
+            List<String> newChunkPointers = [];
+
+            for (int i = 0; i < targetNode.pointers.length; i++) {
+              if (mounted) {
+                setState(() {
+                  _loadingText =
+                      "Copying chunk ${i + 1} of ${targetNode.pointers.length}...";
+                });
+              }
+              String chunkPtr = targetNode.pointers[i];
+
+              // 1. Fetch & Decrypt old chunk
+              Uint8List decryptedChunk =
+                  await compute(_fetchAndDecryptSingleChunkIsolate, {
+                    'pointer': chunkPtr,
+                    'assetKey': oldAssetKey,
+                    'deviceId': deviceId,
+                    'lat': loc['lat'],
+                    'lon': loc['lon'],
+                  });
+
+              // 2. Encrypt new chunk
+              String newChunkPtr = const Uuid().v4().replaceAll('-', '');
+              newChunkPointers.add(newChunkPtr);
+
+              final encryptedChunkBlob = await compute(_encryptChunkIsolate, {
+                'key': newAssetKey,
+                'data': decryptedChunk,
+              });
+
+              // 3. Upload new chunk
+              final res = await http.post(
+                Uri.parse('https://192.168.1.2/payload/upload'),
+                headers: {"Content-Type": "application/json"},
+                body: jsonEncode({
+                  "device_id": deviceId,
+                  "lat": loc['lat'],
+                  "lon": loc['lon'],
+                  "pointer": newChunkPtr,
+                  "base64_blob": base64Encode(encryptedChunkBlob),
+                }),
+              );
+              if (res.statusCode != 200) {
+                throw Exception("Failed to upload duplicated chunk.");
+              }
+            }
+
+            targetNode.pointers.clear();
+            targetNode.pointers.addAll(newChunkPointers);
+            targetNode.metadata['k'] = base64Encode(newAssetKey);
+          }
+
+          final newNodePointer = const Uuid().v4().replaceAll('-', '');
+          final encryptedTargetNode = await compute(
+            _serializeAndEncryptIsolate,
+            {'mek': widget.mek, 'jsonNode': targetNode.toJson()},
+          );
+
+          await http.post(
+            Uri.parse('https://192.168.1.2/payload/upload'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId,
+              "lat": loc['lat'],
+              "lon": loc['lon'],
+              "pointer": newNodePointer,
+              "base64_blob": base64Encode(encryptedTargetNode),
+            }),
+          );
+
+          return newNodePointer;
+        }
+
+        String newlyCopiedPointer = await _duplicateNodeDeep(
+          _clipboardNodeId!,
+          true,
         );
-        if (targetRes.statusCode != 200)
-          throw Exception("Failed to fetch clipboard item.");
-
-        final targetNode = await compute(_decryptAndParseIsolate, {
-          'mek': widget.mek,
-          'payload': targetRes.bodyBytes,
-        });
-
-        // Duplicate metadata and alter name slightly to reflect it is a copy
-        targetNode.metadata['n'] = "${targetNode.metadata['n']} (Copy)";
-
-        final newNodePointer = const Uuid().v4().replaceAll('-', '');
-
-        final encryptedTargetNode = await compute(_serializeAndEncryptIsolate, {
-          'mek': widget.mek,
-          'jsonNode': targetNode.toJson(),
-        });
-
-        // Upload duplicated node
-        await http.post(
-          Uri.parse('https://192.168.1.2/payload/upload'),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode({
-            "device_id": deviceId,
-            "lat": loc['lat'],
-            "lon": loc['lon'],
-            "pointer": newNodePointer,
-            "base64_blob": base64Encode(encryptedTargetNode),
-          }),
-        );
-
-        // Add to current dir pointers
-        currentDirNode.pointers.add(newNodePointer);
+        currentDirNode.pointers.add(newlyCopiedPointer);
       } else {
         // CUT LOGIC
         // Prevent pasting into its own source directory to avoid duplication
