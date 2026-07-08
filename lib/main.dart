@@ -1058,8 +1058,6 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Prevent infinite looping caused by the OS native biometric dialog itself
-    // triggering inactive/resumed lifecycle events.
     if (_isAuthenticating) return;
 
     if (state == AppLifecycleState.inactive ||
@@ -1067,11 +1065,9 @@ class _GalleryGridViewState extends State<GalleryGridView>
       setState(() {
         _isLocked = true;
       });
-    } else if (state == AppLifecycleState.resumed) {
-      if (_isLocked) {
-        _promptBiometricUnlock();
-      }
     }
+    // Auto-prompt on resume removed to prevent infinite biometric loops.
+    // Users will now tap the 'Unlock Vault' button to safely re-authenticate.
   }
 
   Future<void> _promptBiometricUnlock() async {
@@ -2269,7 +2265,8 @@ class ImageViewerScreen extends StatefulWidget {
   State<ImageViewerScreen> createState() => _ImageViewerScreenState();
 }
 
-class _ImageViewerScreenState extends State<ImageViewerScreen> {
+class _ImageViewerScreenState extends State<ImageViewerScreen>
+    with WidgetsBindingObserver {
   late int _currentIndex;
   Uint8List? _highResBytes;
   VideoPlayerController? _videoController;
@@ -2279,14 +2276,20 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
   bool _hasLikedCurrentMedia =
       false; // Tracks if a like has been given during the current viewing session
 
+  // Background Biometric Shield State
+  bool _isLocked = false;
+  bool _isAuthenticating = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentIndex = widget.initialIndex;
     _loadCurrentMedia();
   }
 
   void _cleanup() {
+    _videoController?.pause();
     _videoController?.dispose();
     _videoController = null;
     _proxy?.stop();
@@ -2298,8 +2301,47 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cleanup();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_isAuthenticating) return;
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _videoController?.pause(); // Pause video when locked
+      setState(() {
+        _isLocked = true;
+      });
+    }
+  }
+
+  Future<void> _promptBiometricUnlock() async {
+    if (_isAuthenticating) return;
+    _isAuthenticating = true;
+    bool authenticated = false;
+    try {
+      final LocalAuthentication auth = LocalAuthentication();
+      authenticated = await auth.authenticate(
+        localizedReason: 'Unlock CryptStream Vault',
+        options: const AuthenticationOptions(
+          stickyAuth: true,
+          biometricOnly: true,
+        ),
+      );
+    } catch (e) {
+      // Gracefully swallow errors and stay on the lock screen
+    } finally {
+      _isAuthenticating = false;
+      if (authenticated && mounted) {
+        setState(() {
+          _isLocked = false;
+        });
+      }
+    }
   }
 
   Future<void> _loadCurrentMedia() async {
@@ -2426,6 +2468,50 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Inject the Biometric Lock Screen shield to protect the OS App Switcher Snapshot
+    if (_isLocked) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock_outline, size: 80, color: Colors.redAccent),
+              const SizedBox(height: 24),
+              const Text(
+                "Vault Locked",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "Biometric verification required to resume.",
+                style: TextStyle(color: Colors.white54, fontSize: 16),
+              ),
+              const SizedBox(height: 36),
+              ElevatedButton.icon(
+                onPressed: _promptBiometricUnlock,
+                icon: const Icon(Icons.fingerprint),
+                label: const Text("Unlock Vault"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final item = widget.items[_currentIndex];
 
     return Scaffold(
