@@ -570,6 +570,10 @@ abstract class VfsNode {
   // Dynamically resolve the name via the metadata map for all child types
   String get name => metadata['n'] ?? 'Unknown Item';
 
+  // Heart count property with a default of 0 for older unencrypted JSON payloads
+  int get hearts => (metadata['h'] as num?)?.toInt() ?? 0;
+  set hearts(int value) => metadata['h'] = value;
+
   VfsNode({required this.type, required this.metadata, required this.pointers});
 
   factory VfsNode.fromJson(Map<String, dynamic> json) {
@@ -2208,6 +2212,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                             builder: (context) => ImageViewerScreen(
                               items: _items,
                               initialIndex: index,
+                              mek: widget.mek,
                               onRequestRename: (node) {
                                 Navigator.pop(context);
                                 _showRenameDialog(node);
@@ -2247,6 +2252,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 class ImageViewerScreen extends StatefulWidget {
   final List<VfsNode> items;
   final int initialIndex;
+  final Uint8List mek;
   final void Function(VfsNode)? onRequestRename;
   final void Function(VfsNode)? onRequestDelete;
 
@@ -2254,6 +2260,7 @@ class ImageViewerScreen extends StatefulWidget {
     super.key,
     required this.items,
     required this.initialIndex,
+    required this.mek,
     this.onRequestRename,
     this.onRequestDelete,
   });
@@ -2269,6 +2276,8 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
   LocalVideoProxy? _proxy;
   String _error = "";
   bool _isLoading = true;
+  bool _hasLikedCurrentMedia =
+      false; // Tracks if a like has been given during the current viewing session
 
   @override
   void initState() {
@@ -2295,7 +2304,10 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
 
   Future<void> _loadCurrentMedia() async {
     _cleanup();
-    setState(() {});
+    setState(() {
+      _hasLikedCurrentMedia =
+          false; // Reset session like when opening a new node
+    });
 
     try {
       final item = widget.items[_currentIndex];
@@ -2362,6 +2374,41 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
     }
   }
 
+  Future<void> _likeMedia(VfsNode item) async {
+    if (_hasLikedCurrentMedia) return;
+
+    setState(() {
+      _hasLikedCurrentMedia = true;
+      item.hearts += 1;
+    });
+
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      // Serialize modified media node back into JSON & re-encrypt
+      final updatedBlob = await compute(_serializeAndEncryptIsolate, {
+        'mek': widget.mek,
+        'jsonNode': item.toJson(),
+      });
+
+      // Silently fire an HTTP request to overwrite the existing payload
+      await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointer": item.nodeId,
+          "base64_blob": base64Encode(updatedBlob),
+        }),
+      );
+    } catch (e) {
+      debugPrint("Failed to sync like: $e");
+    }
+  }
+
   void _navigate(int delta) {
     int nextIndex = _currentIndex + delta;
     while (nextIndex >= 0 && nextIndex < widget.items.length) {
@@ -2391,6 +2438,25 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
         backgroundColor: Colors.black,
         elevation: 0,
         actions: [
+          Row(
+            children: [
+              Text(
+                '${item.hearts}',
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+              IconButton(
+                icon: Icon(
+                  _hasLikedCurrentMedia
+                      ? Icons.favorite
+                      : Icons.favorite_border,
+                  color: _hasLikedCurrentMedia
+                      ? Colors.redAccent
+                      : Colors.white,
+                ),
+                onPressed: () => _likeMedia(item),
+              ),
+            ],
+          ),
           PopupMenuButton<String>(
             color: Colors.grey[900],
             icon: const Icon(Icons.more_vert, color: Colors.white),
@@ -2474,38 +2540,40 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
           ),
 
           // Left Navigation Overlay
-          Positioned(
-            left: 10,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: IconButton(
-                icon: const Icon(
-                  Icons.chevron_left,
-                  color: Colors.white,
-                  size: 48,
+          if (_currentIndex > 0)
+            Positioned(
+              left: 10,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: IconButton(
+                  icon: const Icon(
+                    Icons.chevron_left,
+                    color: Colors.white,
+                    size: 48,
+                  ),
+                  onPressed: () => _navigate(-1),
                 ),
-                onPressed: () => _navigate(-1),
               ),
             ),
-          ),
 
           // Right Navigation Overlay
-          Positioned(
-            right: 10,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: IconButton(
-                icon: const Icon(
-                  Icons.chevron_right,
-                  color: Colors.white,
-                  size: 48,
+          if (_currentIndex < widget.items.length - 1)
+            Positioned(
+              right: 10,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: IconButton(
+                  icon: const Icon(
+                    Icons.chevron_right,
+                    color: Colors.white,
+                    size: 48,
+                  ),
+                  onPressed: () => _navigate(1),
                 ),
-                onPressed: () => _navigate(1),
               ),
             ),
-          ),
         ],
       ),
     );
