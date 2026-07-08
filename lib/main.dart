@@ -1042,6 +1042,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
   // Edit Mode Flag
   bool _isEditMode = false;
+  Set<String> _selectedItems = {};
 
   @override
   void initState() {
@@ -1952,6 +1953,9 @@ class _GalleryGridViewState extends State<GalleryGridView>
               onPressed: () {
                 setState(() {
                   _isEditMode = !_isEditMode;
+                  if (!_isEditMode) {
+                    _selectedItems.clear();
+                  }
                 });
               },
             ),
@@ -1959,9 +1963,26 @@ class _GalleryGridViewState extends State<GalleryGridView>
               icon: const Icon(Icons.create_new_folder, color: Colors.grey),
               onPressed: _showCreateFolderDialog,
             ),
-            IconButton(
-              icon: const Icon(Icons.refresh, color: Colors.grey),
-              onPressed: _fetchDirectory,
+            PopupMenuButton<String>(
+              color: Colors.grey[900],
+              icon: const Icon(Icons.more_vert, color: Colors.grey),
+              onSelected: (value) {
+                if (value == 'refresh') {
+                  _fetchDirectory();
+                }
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: 'refresh',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, color: Colors.white, size: 20),
+                      SizedBox(width: 12),
+                      Text('Refresh', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -2095,6 +2116,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 },
                 itemBuilder: (context, index) {
                   final item = _items[index];
+                  bool isSelected = _selectedItems.contains(item.nodeId);
                   Widget contentWidget;
 
                   if (item is VfsDirectory) {
@@ -2195,6 +2217,17 @@ class _GalleryGridViewState extends State<GalleryGridView>
                   return InkWell(
                     key: ValueKey(item.nodeId),
                     onTap: () {
+                      if (_isEditMode) {
+                        setState(() {
+                          if (isSelected) {
+                            _selectedItems.remove(item.nodeId);
+                          } else {
+                            _selectedItems.add(item.nodeId);
+                          }
+                        });
+                        return;
+                      }
+
                       if (item is VfsDirectory) {
                         setState(() {
                           _navigationStack.add(_currentPointer);
@@ -2230,8 +2263,31 @@ class _GalleryGridViewState extends State<GalleryGridView>
                       color: Colors.grey[850],
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
+                        side: isSelected
+                            ? const BorderSide(
+                                color: Colors.blueAccent,
+                                width: 2,
+                              )
+                            : BorderSide.none,
                       ),
-                      child: contentWidget,
+                      clipBehavior: Clip.antiAlias,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          contentWidget,
+                          if (isSelected)
+                            Container(
+                              color: Colors.blueAccent.withOpacity(0.3),
+                              child: const Center(
+                                child: Icon(
+                                  Icons.check_circle,
+                                  color: Colors.white,
+                                  size: 40,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   );
                 },
