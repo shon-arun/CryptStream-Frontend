@@ -150,22 +150,30 @@ class DeviceIdentity {
     return await _storage.read(key: 'device_public_key');
   }
 
+  static AuthenticationOptions _getAuthOptions(bool biometricOnly) {
+    if (biometricOnly) {
+      return const AuthenticationOptions(stickyAuth: true, biometricOnly: true);
+    } else {
+      return const AuthenticationOptions(
+        stickyAuth: true,
+        biometricOnly: false,
+      );
+    }
+  }
+
   static Future<String?> getPrivateKey() async {
     final LocalAuthentication auth = LocalAuthentication();
     final bool canAuthenticateWithBiometrics = await auth.canCheckBiometrics;
     final bool canAuthenticate =
         canAuthenticateWithBiometrics || await auth.isDeviceSupported();
 
-    if (!canAuthenticate) {
-      throw Exception("Biometric hardware is required to release secure keys.");
-    }
+    // if (!canAuthenticate) {
+    //   throw Exception("Biometric hardware is required to release secure keys.");
+    // }
 
     final authenticated = await auth.authenticate(
       localizedReason: 'Authenticate to release your private key',
-      options: const AuthenticationOptions(
-        stickyAuth: true,
-        biometricOnly: true,
-      ),
+      options: _getAuthOptions(canAuthenticate),
     );
 
     if (!authenticated) throw Exception("Biometric authentication failed.");
