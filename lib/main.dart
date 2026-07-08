@@ -2712,6 +2712,10 @@ class _ImageViewerScreenState extends State<ImageViewerScreen>
         ),
         backgroundColor: Colors.black,
         elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         actions: [
           Row(
             children: [
