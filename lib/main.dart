@@ -1586,6 +1586,8 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
         if (node is VfsJpeg) {
           pointersToPurge.addAll(node.pointers); // Add all 512KB chunks
+        } else if (node is VfsVideo) {
+          pointersToPurge.addAll(node.pointers);
         } else if (node is VfsDirectory) {
           for (String ptr in node.pointers) {
             final res = await http.post(
@@ -1675,6 +1677,132 @@ class _GalleryGridViewState extends State<GalleryGridView>
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+      }
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _deleteSelectedNodes() async {
+    setState(() {
+      _isLoading = true;
+      _loadingText = "Purging selected items...";
+    });
+
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      List<String> pointersToPurge = [];
+
+      Future<void> _collectGarbage(VfsNode node) async {
+        pointersToPurge.add(node.nodeId);
+
+        if (node is VfsJpeg || node is VfsVideo) {
+          pointersToPurge.addAll(node.pointers);
+        } else if (node is VfsDirectory) {
+          for (String ptr in node.pointers) {
+            final res = await http.post(
+              Uri.parse('https://192.168.1.2/payload/fetch'),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode({
+                "device_id": deviceId,
+                "lat": loc['lat'],
+                "lon": loc['lon'],
+                "pointer": ptr,
+              }),
+            );
+            if (res.statusCode == 200) {
+              final child = await compute(_decryptAndParseIsolate, {
+                'mek': widget.mek,
+                'payload': res.bodyBytes,
+              });
+              child.nodeId = ptr;
+              await _collectGarbage(child); // Recurse
+            }
+          }
+        }
+      }
+
+      for (String selectedId in _selectedItems) {
+        final node = _items.firstWhere((e) => e.nodeId == selectedId);
+        await _collectGarbage(node);
+      }
+
+      final parentFetchRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/fetch'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointer": _currentPointer,
+        }),
+      );
+
+      if (parentFetchRes.statusCode == 200) {
+        final parentNode = await compute(_decryptAndParseIsolate, {
+          'mek': widget.mek,
+          'payload': parentFetchRes.bodyBytes,
+        });
+
+        if (parentNode is VfsDirectory) {
+          parentNode.pointers.removeWhere(
+            (ptr) => _selectedItems.contains(ptr),
+          );
+
+          final updatedParentBlob = await compute(_serializeAndEncryptIsolate, {
+            'mek': widget.mek,
+            'jsonNode': parentNode.toJson(),
+          });
+
+          await http.post(
+            Uri.parse('https://192.168.1.2/payload/upload'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId,
+              "lat": loc['lat'],
+              "lon": loc['lon'],
+              "pointer": _currentPointer,
+              "base64_blob": base64Encode(updatedParentBlob),
+            }),
+          );
+        }
+      }
+
+      final deleteRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/delete'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointers": pointersToPurge,
+        }),
+      );
+
+      if (deleteRes.statusCode != 200) {
+        throw Exception("Backend failed to purge blocks.");
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Bulk delete successful!')),
+        );
+      }
+
+      setState(() {
+        _isEditMode = false;
+        _selectedItems.clear();
+      });
+
+      _fetchDirectory();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Bulk delete failed: $e')));
       }
       setState(() {
         _isLoading = false;
@@ -1945,6 +2073,11 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 )
               : null,
           actions: [
+            if (_isEditMode && _selectedItems.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.delete, color: Colors.redAccent),
+                onPressed: _deleteSelectedNodes,
+              ),
             IconButton(
               icon: Icon(
                 _isEditMode ? Icons.check : Icons.edit,
