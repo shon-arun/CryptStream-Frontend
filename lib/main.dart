@@ -661,11 +661,9 @@ Future<Uint8List> signChallenge(
 }
 
 Future<Map<String, double>> getCurrentLocation() async {
-  if (LocationService.currentPosition == null) {
-    LocationService.currentPosition = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
-    );
-  }
+  LocationService.currentPosition ??= await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
   return {
     "lat": LocationService.currentPosition!.latitude,
     "lon": LocationService.currentPosition!.longitude,
@@ -1040,7 +1038,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
   List<VfsNode> _items = [];
   String _error = "";
 
-  List<String> _navigationStack = [];
+  final List<String> _navigationStack = [];
   String _currentPointer = "root";
   String _currentFolderName = "Encrypted Gallery";
 
@@ -1050,7 +1048,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
   // Edit Mode Flag
   bool _isEditMode = false;
-  Set<String> _selectedItems = {};
+  final Set<String> _selectedItems = {};
 
   // Clipboard State Variables
   String? _clipboardNodeId;
@@ -1613,7 +1611,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
       List<String> pointersToPurge = [];
 
-      Future<void> _collectGarbage(VfsNode node) async {
+      Future<void> collectGarbage(VfsNode node) async {
         pointersToPurge.add(node.nodeId);
 
         if (node is VfsJpeg) {
@@ -1638,13 +1636,13 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 'payload': res.bodyBytes,
               });
               child.nodeId = ptr;
-              await _collectGarbage(child); // Recurse
+              await collectGarbage(child); // Recurse
             }
           }
         }
       }
 
-      await _collectGarbage(nodeToDelete);
+      await collectGarbage(nodeToDelete);
 
       final parentFetchRes = await http.post(
         Uri.parse('https://192.168.1.2/payload/fetch'),
@@ -1728,7 +1726,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
       List<String> pointersToPurge = [];
 
-      Future<void> _collectGarbage(VfsNode node) async {
+      Future<void> collectGarbage(VfsNode node) async {
         pointersToPurge.add(node.nodeId);
 
         if (node is VfsJpeg || node is VfsVideo) {
@@ -1751,7 +1749,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 'payload': res.bodyBytes,
               });
               child.nodeId = ptr;
-              await _collectGarbage(child); // Recurse
+              await collectGarbage(child); // Recurse
             }
           }
         }
@@ -1759,7 +1757,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
       for (String selectedId in _selectedItems) {
         final node = _items.firstWhere((e) => e.nodeId == selectedId);
-        await _collectGarbage(node);
+        await collectGarbage(node);
       }
 
       final parentFetchRes = await http.post(
@@ -1940,7 +1938,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
 
       if (!_isCutAction) {
         // COPY LOGIC
-        Future<String> _duplicateNodeDeep(
+        Future<String> duplicateNodeDeep(
           String sourcePointer,
           bool isRootCopy,
         ) async {
@@ -1970,7 +1968,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
           if (targetNode is VfsDirectory) {
             List<String> duplicatedChildren = [];
             for (String childPtr in targetNode.pointers) {
-              duplicatedChildren.add(await _duplicateNodeDeep(childPtr, false));
+              duplicatedChildren.add(await duplicateNodeDeep(childPtr, false));
             }
             targetNode.pointers.clear();
             targetNode.pointers.addAll(duplicatedChildren);
@@ -2054,7 +2052,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
           return newNodePointer;
         }
 
-        String newlyCopiedPointer = await _duplicateNodeDeep(
+        String newlyCopiedPointer = await duplicateNodeDeep(
           _clipboardNodeId!,
           true,
         );
@@ -2747,7 +2745,7 @@ class _GalleryGridViewState extends State<GalleryGridView>
                           contentWidget,
                           if (isSelected)
                             Container(
-                              color: Colors.blueAccent.withOpacity(0.3),
+                              color: Colors.blueAccent.withValues(alpha: 0.3),
                               child: const Center(
                                 child: Icon(
                                   Icons.check_circle,
