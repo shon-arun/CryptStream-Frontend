@@ -1109,6 +1109,25 @@ class _GalleryGridViewState extends State<GalleryGridView>
     }
   }
 
+  void _logout() {
+    // 1. Explicitly clear all sensitive state variables
+    setState(() {
+      _items.clear();
+      _selectedItems.clear();
+      _navigationStack.clear();
+      _currentPointer = "root";
+      _clipboardNodeId = null;
+      _clipboardSourceParentId = null;
+    });
+
+    // 2. Forcefully destroy the entire navigation stack to prevent back-button bypass
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (context) => const PassphraseGate()),
+      (route) => false,
+    );
+  }
+
   Future<void> _fetchDirectory() async {
     setState(() {
       _isLoading = true;
@@ -2353,6 +2372,10 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 ),
               ],
             ),
+            IconButton(
+              icon: const Icon(Icons.logout, color: Colors.redAccent),
+              onPressed: _logout,
+            ),
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
@@ -2769,6 +2792,18 @@ class _ImageViewerScreenState extends State<ImageViewerScreen>
     }
   }
 
+  void _logout() {
+    // 1. Explicitly clear sensitive state
+    _cleanup();
+
+    // 2. Forcefully destroy the entire navigation stack to prevent back-button bypass
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (context) => const PassphraseGate()),
+      (route) => false,
+    );
+  }
+
   Future<void> _loadCurrentMedia() async {
     _cleanup();
     setState(() {
@@ -3007,6 +3042,10 @@ class _ImageViewerScreenState extends State<ImageViewerScreen>
                 ),
               ),
             ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            onPressed: _logout,
           ),
         ],
       ),
