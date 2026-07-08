@@ -1052,6 +1052,11 @@ class _GalleryGridViewState extends State<GalleryGridView>
   bool _isEditMode = false;
   Set<String> _selectedItems = {};
 
+  // Clipboard State Variables
+  String? _clipboardNodeId;
+  String? _clipboardSourceParentId;
+  bool _isCutAction = false;
+
   @override
   void initState() {
     super.initState();
@@ -1877,6 +1882,191 @@ class _GalleryGridViewState extends State<GalleryGridView>
     }
   }
 
+  Future<void> _pasteNode() async {
+    if (_clipboardNodeId == null) return;
+
+    setState(() {
+      _isLoading = true;
+      _loadingText = _isCutAction ? "Moving item..." : "Copying item...";
+    });
+
+    try {
+      String deviceId = await DeviceIdentity.getDeviceId();
+      final loc = await getCurrentLocation();
+
+      // 1. Fetch Current Directory
+      final currentDirRes = await http.post(
+        Uri.parse('https://192.168.1.2/payload/fetch'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointer": _currentPointer,
+        }),
+      );
+
+      if (currentDirRes.statusCode != 200)
+        throw Exception("Failed to fetch current directory.");
+
+      final currentDirNode = await compute(_decryptAndParseIsolate, {
+        'mek': widget.mek,
+        'payload': currentDirRes.bodyBytes,
+      });
+
+      if (currentDirNode is! VfsDirectory)
+        throw Exception("Current pointer is not a directory.");
+
+      if (!_isCutAction) {
+        // COPY LOGIC
+        final targetRes = await http.post(
+          Uri.parse('https://192.168.1.2/payload/fetch'),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "device_id": deviceId,
+            "lat": loc['lat'],
+            "lon": loc['lon'],
+            "pointer": _clipboardNodeId,
+          }),
+        );
+        if (targetRes.statusCode != 200)
+          throw Exception("Failed to fetch clipboard item.");
+
+        final targetNode = await compute(_decryptAndParseIsolate, {
+          'mek': widget.mek,
+          'payload': targetRes.bodyBytes,
+        });
+
+        // Duplicate metadata and alter name slightly to reflect it is a copy
+        targetNode.metadata['n'] = "${targetNode.metadata['n']} (Copy)";
+
+        final newNodePointer = const Uuid().v4().replaceAll('-', '');
+
+        final encryptedTargetNode = await compute(_serializeAndEncryptIsolate, {
+          'mek': widget.mek,
+          'jsonNode': targetNode.toJson(),
+        });
+
+        // Upload duplicated node
+        await http.post(
+          Uri.parse('https://192.168.1.2/payload/upload'),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({
+            "device_id": deviceId,
+            "lat": loc['lat'],
+            "lon": loc['lon'],
+            "pointer": newNodePointer,
+            "base64_blob": base64Encode(encryptedTargetNode),
+          }),
+        );
+
+        // Add to current dir pointers
+        currentDirNode.pointers.add(newNodePointer);
+      } else {
+        // CUT LOGIC
+        // Prevent pasting into its own source directory to avoid duplication
+        if (_clipboardSourceParentId == _currentPointer) {
+          setState(() {
+            _clipboardNodeId = null;
+            _clipboardSourceParentId = null;
+            _isLoading = false;
+          });
+          return;
+        }
+
+        // Add existing pointer to current dir
+        currentDirNode.pointers.add(_clipboardNodeId!);
+
+        // Fetch source dir and remove pointer
+        if (_clipboardSourceParentId != null) {
+          final sourceDirRes = await http.post(
+            Uri.parse('https://192.168.1.2/payload/fetch'),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "device_id": deviceId,
+              "lat": loc['lat'],
+              "lon": loc['lon'],
+              "pointer": _clipboardSourceParentId,
+            }),
+          );
+
+          if (sourceDirRes.statusCode == 200) {
+            final sourceDirNode = await compute(_decryptAndParseIsolate, {
+              'mek': widget.mek,
+              'payload': sourceDirRes.bodyBytes,
+            });
+
+            if (sourceDirNode is VfsDirectory) {
+              sourceDirNode.pointers.remove(_clipboardNodeId);
+              final encryptedSourceDirNode = await compute(
+                _serializeAndEncryptIsolate,
+                {'mek': widget.mek, 'jsonNode': sourceDirNode.toJson()},
+              );
+              await http.post(
+                Uri.parse('https://192.168.1.2/payload/upload'),
+                headers: {"Content-Type": "application/json"},
+                body: jsonEncode({
+                  "device_id": deviceId,
+                  "lat": loc['lat'],
+                  "lon": loc['lon'],
+                  "pointer": _clipboardSourceParentId,
+                  "base64_blob": base64Encode(encryptedSourceDirNode),
+                }),
+              );
+            }
+          }
+        }
+      }
+
+      // Save current directory modifications (applies to both Cut and Copy)
+      final encryptedCurrentDirNode = await compute(
+        _serializeAndEncryptIsolate,
+        {'mek': widget.mek, 'jsonNode': currentDirNode.toJson()},
+      );
+
+      await http.post(
+        Uri.parse('https://192.168.1.2/payload/upload'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "device_id": deviceId,
+          "lat": loc['lat'],
+          "lon": loc['lon'],
+          "pointer": _currentPointer,
+          "base64_blob": base64Encode(encryptedCurrentDirNode),
+        }),
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_isCutAction ? 'Item moved!' : 'Item copied!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+
+      // Clear clipboard context
+      setState(() {
+        _clipboardNodeId = null;
+        _clipboardSourceParentId = null;
+      });
+
+      _fetchDirectory();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Paste failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
   void _showItemOptions(VfsNode item) {
     showModalBottomSheet(
       context: context,
@@ -1897,6 +2087,39 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 onTap: () {
                   Navigator.pop(context);
                   _showRenameDialog(item);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_cut, color: Colors.white),
+                title: const Text('Cut', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _clipboardNodeId = item.nodeId;
+                    _clipboardSourceParentId = _currentPointer;
+                    _isCutAction = true;
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Item cut to clipboard')),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_copy, color: Colors.white),
+                title: const Text(
+                  'Copy',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _clipboardNodeId = item.nodeId;
+                    _clipboardSourceParentId = _currentPointer;
+                    _isCutAction = false;
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Item copied to clipboard')),
+                  );
                 },
               ),
               ListTile(
@@ -2100,6 +2323,11 @@ class _GalleryGridViewState extends State<GalleryGridView>
                 });
               },
             ),
+            if (_clipboardNodeId != null && !_isEditMode)
+              IconButton(
+                icon: const Icon(Icons.paste, color: Colors.blueAccent),
+                onPressed: _pasteNode,
+              ),
             IconButton(
               icon: const Icon(Icons.create_new_folder, color: Colors.grey),
               onPressed: _showCreateFolderDialog,
